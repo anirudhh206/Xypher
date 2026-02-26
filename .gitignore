@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+.yarn/
+
+# Build outputs
+dist/
+*.wasm
+
+# Environment — NEVER commit
+.env
+
+# Bun
+bun.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
