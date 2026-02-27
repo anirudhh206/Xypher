@@ -1,0 +1,16 @@
+{
+  "name": "@confidential-guard/risk-engine",
+  "version": "0.1.0",
+  "private": true,
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.0.0"
+  }
+}

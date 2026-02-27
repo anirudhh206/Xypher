@@ -1,7 +1,7 @@
 // ============================================================
 // ConfidentialGuard Protocol — Credit Intelligence Engine
 // workflows/credit-intelligence-engine/main.ts
-// DAY 1: Working simulation — string-based consensus pattern
+// DAY 1: Confidential HTTP inside TEE (no DON consensus)
 // ============================================================
 
 import {
@@ -9,8 +9,6 @@ import {
   type CronPayload,
   Runner,
   type Runtime,
-  type HTTPSendRequester,
-  consensusIdenticalAggregation,
 } from '@chainlink/cre-sdk'
 import { z } from 'zod'
 
@@ -36,32 +34,6 @@ interface PositionSummary {
   totalDebtUSD: number
   netPositionUSD: number
   atRisk: boolean
-}
-
-// ============================================================
-// FETCH — returns PositionSummary object directly
-// ============================================================
-const fetchAavePositions = (
-  sendRequester: HTTPSendRequester,
-  config: Config,
-): PositionSummary => {
-  const url = `${config.aaveApiUrl}/data/users/${config.testWalletAddress}`
-  const response = sendRequester.sendRequest({ url, method: 'GET' }).result()
-
-  if (response.statusCode !== 200) return getMockAavePosition()
-
-  const rawData = JSON.parse(response.body.toString())
-
-  return {
-    protocol: 'Aave V3',
-    healthFactor: parseFloat(rawData.healthFactor ?? '999'),
-    totalCollateralUSD: parseFloat(rawData.totalCollateralMarketReferenceCurrency ?? '0'),
-    totalDebtUSD: parseFloat(rawData.totalDebtMarketReferenceCurrency ?? '0'),
-    netPositionUSD:
-      parseFloat(rawData.totalCollateralMarketReferenceCurrency ?? '0') -
-      parseFloat(rawData.totalDebtMarketReferenceCurrency ?? '0'),
-    atRisk: parseFloat(rawData.healthFactor ?? '999') < 1.5,
-  }
 }
 
 // ============================================================
@@ -121,18 +93,45 @@ const onCronTrigger = (
   runtime.log('[ConfidentialGuard] ======= Credit Intelligence Engine =======')
   runtime.log(`[ConfidentialGuard] Wallet: ${runtime.config.testWalletAddress}`)
 
-  // Step 1: Fetch positions — return string, use identical consensus
+  // Step 1: Confidential HTTP — request runs inside TEE enclave, no DON consensus needed.
+  // ConfidentialHTTPClient (confidential-http@1.0.0-alpha) is a single-node capability.
+  // HTTPClient with consensusIdenticalAggregation requires N nodes to agree — fails in simulation.
   runtime.log('[ConfidentialGuard] Step 1: Fetching Aave positions...')
 
-  const httpClient = new cre.capabilities.HTTPClient()
+  const confHttp = new cre.capabilities.ConfidentialHTTPClient()
+  const url = `${runtime.config.aaveApiUrl}/data/users/${runtime.config.testWalletAddress}`
 
-  const position = httpClient
-    .sendRequest(
-      runtime,
-      fetchAavePositions,
-      consensusIdenticalAggregation<PositionSummary>(),
-    )(runtime.config)
-    .result()
+  let position: PositionSummary
+  try {
+    const response = confHttp
+      .sendRequest(runtime, {
+        request: { url, method: 'GET' },
+        vaultDonSecrets: [],
+      })
+      .result()
+
+    if (response.statusCode !== 200) {
+      runtime.log(`[ConfidentialGuard] API returned ${response.statusCode}, using mock data`)
+      position = getMockAavePosition()
+    } else {
+      const rawData = JSON.parse(response.body.toString()) as Record<string, string>
+      const hf = parseFloat(rawData.healthFactor ?? '999')
+      const collateral = parseFloat(rawData.totalCollateralMarketReferenceCurrency ?? '0')
+      const debt = parseFloat(rawData.totalDebtMarketReferenceCurrency ?? '0')
+      position = {
+        protocol: 'Aave V3',
+        healthFactor: hf,
+        totalCollateralUSD: collateral,
+        totalDebtUSD: debt,
+        netPositionUSD: collateral - debt,
+        atRisk: hf < 1.5,
+      }
+    }
+  } catch (err: unknown) {
+    runtime.log(`[ConfidentialGuard] Confidential HTTP error: ${String(err)}`)
+    runtime.log('[ConfidentialGuard] Falling back to mock position data')
+    position = getMockAavePosition()
+  }
 
   runtime.log(`[ConfidentialGuard] Protocol: ${position.protocol}`)
   runtime.log(`[ConfidentialGuard] Health Factor: ${position.healthFactor}`)
@@ -140,16 +139,9 @@ const onCronTrigger = (
   runtime.log(`[ConfidentialGuard] Debt: $${position.totalDebtUSD}`)
   runtime.log(`[ConfidentialGuard] At Risk: ${position.atRisk}`)
 
-  // Step 2: Risk assessment
+  // Step 2: Risk assessment (runs in same TEE enclave — result never leaves unencrypted)
   runtime.log('[ConfidentialGuard] Step 2: Computing risk assessment...')
-  const assessment = computeRiskAssessment(position)
-
-  const parsed = JSON.parse(assessment)
-  runtime.log(`[ConfidentialGuard] Risk Level: ${parsed.riskLevel}`)
-  runtime.log(`[ConfidentialGuard] Recommendation: ${parsed.recommendation}`)
-  runtime.log('[ConfidentialGuard] ======= Engine Complete =======')
-
-  return assessment
+  return computeRiskAssessment(position)
 }
 
 // ============================================================

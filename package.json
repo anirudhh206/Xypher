@@ -1,0 +1,8 @@
+{
+  "name": "confidential-guard-protocol",
+  "private": true,
+  "workspaces": [
+    "risk-engine",
+    "workflows/credit-intelligence-engine"
+  ]
+}
