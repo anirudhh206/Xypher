@@ -39,28 +39,20 @@ interface PositionSummary {
 }
 
 // ============================================================
-// FETCH — returns JSON string for consensus compatibility
-// consensusIdenticalAggregation works reliably on strings
+// FETCH — returns PositionSummary object directly
 // ============================================================
-const fetchAavePositionsAsString = (
+const fetchAavePositions = (
   sendRequester: HTTPSendRequester,
   config: Config,
-): string => {
+): PositionSummary => {
   const url = `${config.aaveApiUrl}/data/users/${config.testWalletAddress}`
+  const response = sendRequester.sendRequest({ url, method: 'GET' }).result()
 
-  const response = sendRequester
-    .sendRequest({ url, method: 'GET' })
-    .result()
+  if (response.statusCode !== 200) return getMockAavePosition()
 
-  if (response.statusCode !== 200) {
-    // Return mock data as JSON string — fallback for unavailable API
-    return JSON.stringify(getMockAavePosition())
-  }
+  const rawData = JSON.parse(response.body.toString())
 
-  const responseText = response.body.toString()
-  const rawData = JSON.parse(responseText)
-
-  const position: PositionSummary = {
+  return {
     protocol: 'Aave V3',
     healthFactor: parseFloat(rawData.healthFactor ?? '999'),
     totalCollateralUSD: parseFloat(rawData.totalCollateralMarketReferenceCurrency ?? '0'),
@@ -70,8 +62,6 @@ const fetchAavePositionsAsString = (
       parseFloat(rawData.totalDebtMarketReferenceCurrency ?? '0'),
     atRisk: parseFloat(rawData.healthFactor ?? '999') < 1.5,
   }
-
-  return JSON.stringify(position)
 }
 
 // ============================================================
@@ -136,16 +126,13 @@ const onCronTrigger = (
 
   const httpClient = new cre.capabilities.HTTPClient()
 
-  const positionJson = httpClient
+  const position = httpClient
     .sendRequest(
       runtime,
-      fetchAavePositionsAsString,
-      consensusIdenticalAggregation<string>(),
+      fetchAavePositions,
+      consensusIdenticalAggregation<PositionSummary>(),
     )(runtime.config)
     .result()
-
-  // Parse back to object after consensus
-  const position: PositionSummary = JSON.parse(positionJson)
 
   runtime.log(`[ConfidentialGuard] Protocol: ${position.protocol}`)
   runtime.log(`[ConfidentialGuard] Health Factor: ${position.healthFactor}`)
