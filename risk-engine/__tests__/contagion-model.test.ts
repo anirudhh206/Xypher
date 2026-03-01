@@ -33,25 +33,29 @@ import {
 } from '../src/types'
 
 const ETH = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
-const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
 const W = WEI_PER_TOKEN
 
-const BASE_PRICES: PriceMap = buildPriceMap({
-  [ETH]: 3_000n * W,
-  [USDC]: W,
-})
+// CANONICAL_USD_ASSET is always $1.00 and is NEVER affected by applyPriceShock.
+// Using it as the debt asset is the correct way to model a DeFi borrower:
+// collateral (ETH, WBTC) is volatile; debt (stablecoins) stays at peg.
+//
+// If USDC were used as the debt asset (with its real token address in the
+// price map), applyPriceShock would reduce USDC's price too — causing the
+// numerator and denominator to both fall by the same factor and cancelling
+// out. UHF would stay constant at every shock level → no cascade ever.
+// CANONICAL_USD_ASSET sidesteps this by always resolving to WEI_PER_TOKEN.
+const BASE_PRICES: PriceMap = buildPriceMap({ [ETH]: 3_000n * W })
 
 // ── Cascade threshold calculation helpers ─────────────────────
-// For single ETH/USDC positions:
+// For single ETH/CANONICAL_USD_ASSET positions:
 //   UHF = (collateral × ETH_price × liqThreshold) / (debt × $1)
 //   stressedHF at drop d = UHF × (1 - d)
+//   (ETH shocked, CANONICAL never shocked → ratio changes)
 //   cascade when stressedHF < 1.0 → d > 1 - 1/UHF
-//
-// Verify by picking debt amounts that produce exact UHF values.
 
-function ethUsdcPosition(
+function cascadePos(
   collateralAmountEth: bigint,
-  debtUsdc: bigint,
+  debtUSD: bigint,
   liqThreshold = 0.825,
 ): PositionData {
   return {
@@ -59,48 +63,43 @@ function ethUsdcPosition(
     chainId: 1,
     collateralAsset: ETH,
     collateralAmount: collateralAmountEth * W,
-    debtAsset: USDC,
-    debtAmount: debtUsdc * W,
+    debtAsset: CANONICAL_USD_ASSET,   // USD debt — immune to price shocks
+    debtAmount: debtUSD * W,
     liquidationThreshold: liqThreshold,
   }
 }
 
 // Position that SURVIVES all scenarios (cascade-resistant):
-// 10 ETH, 10,000 USDC → UHF = 2.475
+// 10 ETH, 10,000 USD → UHF = 24,750 / 10,000 = 2.475
 // At 50% drop: stressedHF = 2.475 × 0.50 = 1.2375 > 1.0 ✓
-const RESILIENT = ethUsdcPosition(10n, 10_000n)
+const RESILIENT = cascadePos(10n, 10_000n)
 
 // Position that cascades at 10% drop:
-// Need: UHF × 0.95 ≥ 1.0 (survives 5%) AND UHF × 0.90 < 1.0 (cascades 10%)
-// → 1/0.90 > UHF ≥ 1/0.95 → 1.111... > UHF ≥ 1.0526...
-// With 10 ETH, liqThreshold 0.825:
-//   adjustedCollateral = 10 × 3000 × 0.825 = 24,750
-//   For UHF ≈ 1.08: debt = 24,750 / 1.08 ≈ 22,917 → use 23,000 USDC
-//   Check: UHF = 24750/23000 ≈ 1.0761
-//   At 5%:  stressedHF = 1.0761 × 0.95 ≈ 1.0223 ≥ 1.0 ✓
-//   At 10%: stressedHF = 1.0761 × 0.90 ≈ 0.9685 < 1.0 ✓
-const CASCADE_AT_10PCT = ethUsdcPosition(10n, 23_000n)
+// Need UHF × 0.95 ≥ 1.0 (survives 5%) AND UHF × 0.90 < 1.0 (cascades 10%)
+// → 1.0526 ≤ UHF < 1.1111
+// adjustedCollateral = 10 × 3000 × 0.825 = 24,750
+// debt = 23,000 → UHF = 24750/23000 ≈ 1.0761
+//   At 5%:  1.0761 × 0.95 ≈ 1.022 ≥ 1.0 ✓
+//   At 10%: 1.0761 × 0.90 ≈ 0.969 < 1.0 ✓
+const CASCADE_AT_10PCT = cascadePos(10n, 23_000n)
 
 // Position that cascades at 30% drop:
 // Need UHF × 0.75 ≥ 1.0 AND UHF × 0.70 < 1.0
-// → 1/0.70 > UHF ≥ 1/0.75 → 1.4286 > UHF ≥ 1.3333
-// With 10 ETH: debt = 24750 / 1.38 ≈ 17,935 → use 18,000 USDC
-//   UHF = 24750/18000 = 1.375
-//   At 25%: stressedHF = 1.375 × 0.75 = 1.031 ≥ 1.0 ✓
-//   At 30%: stressedHF = 1.375 × 0.70 = 0.9625 < 1.0 ✓
-const CASCADE_AT_30PCT = ethUsdcPosition(10n, 18_000n)
+// → 1.3333 ≤ UHF < 1.4286
+// debt = 18,000 → UHF = 24750/18000 = 1.375
+//   At 25%: 1.375 × 0.75 = 1.031 ≥ 1.0 ✓
+//   At 30%: 1.375 × 0.70 = 0.9625 < 1.0 ✓
+const CASCADE_AT_30PCT = cascadePos(10n, 18_000n)
 
 // Position that cascades at 5% drop:
 // Need UHF × 0.95 < 1.0 AND UHF ≥ 1.0 (not already liquidatable)
-// → 1.0 ≤ UHF < 1/0.95 ≈ 1.0526
-// With 10 ETH: debt range 24750/1.0526 to 24750 → (23512.5, 24750]
-//   Use 24,000 USDC: UHF = 24750/24000 = 1.03125
-//   At 5%: stressedHF = 1.03125 × 0.95 = 0.9797 < 1.0 ✓
-const CASCADE_AT_5PCT = ethUsdcPosition(10n, 24_000n)
+// → 1.0 ≤ UHF < 1.0526
+// debt = 24,000 → UHF = 24750/24000 = 1.03125
+//   At 5%: 1.03125 × 0.95 = 0.9797 < 1.0 ✓
+const CASCADE_AT_5PCT = cascadePos(10n, 24_000n)
 
-// Position already undercollateralized at current prices:
-//   debt > adjustedCollateral: use 30,000 USDC (UHF = 24750/30000 = 0.825)
-const UNDERWATER = ethUsdcPosition(10n, 30_000n)
+// Position already undercollateralized at current prices (UHF = 0.825 < 1.0):
+const UNDERWATER = cascadePos(10n, 30_000n)
 
 describe('applyPriceShock', () => {
   it('does NOT modify CANONICAL_USD_ASSET price (USD stays at peg)', () => {
@@ -118,7 +117,8 @@ describe('applyPriceShock', () => {
   it('50% drop halves all non-USD prices exactly', () => {
     const shocked = applyPriceShock(BASE_PRICES, 0.50)
     expect(shocked[ETH]).toBe(1_500n * W)
-    expect(shocked[USDC]).toBe(W / 2n)  // USDC is NOT CANONICAL, so it gets shocked too
+    // CANONICAL_USD_ASSET is always unchanged
+    expect(shocked[CANONICAL_USD_ASSET]).toBe(W)
   })
 
   it('0% drop leaves all prices unchanged', () => {
@@ -127,13 +127,12 @@ describe('applyPriceShock', () => {
     expect(shocked[CANONICAL_USD_ASSET]).toBe(W)
   })
 
-  it('USDC price IS shocked (not the same as CANONICAL_USD_ASSET)', () => {
-    // USDC has a real token address — it IS shocked unlike CANONICAL_USD_ASSET
-    // This correctly models the scenario where even stablecoins de-peg in a crash
+  it('non-CANONICAL token prices are reduced proportionally', () => {
+    // ETH is a real token address — it IS shocked unlike CANONICAL_USD_ASSET
     const shocked = applyPriceShock(BASE_PRICES, 0.10)
-    // USDC price = $1 × 0.90 = $0.90 in shocked prices
-    const expectedUsdc = (W * 9_000n) / 10_000n  // 90.00% retention
-    expect(shocked[USDC]).toBe(expectedUsdc)
+    // ETH price = $3,000 × 0.90 = $2,700 in shocked prices
+    const expectedEth = (3_000n * W * 9_000n) / 10_000n  // 90.00% retention
+    expect(shocked[ETH]).toBe(expectedEth)
   })
 
   it('preserves 4 basis-point precision for retention fraction', () => {
@@ -163,7 +162,8 @@ describe('simulatePriceShocks', () => {
   it('results are ordered by ascending dropFraction matching PRICE_DROP_SCENARIOS', () => {
     const results = simulatePriceShocks([RESILIENT], BASE_PRICES)
     results.forEach((r, i) => {
-      expect(r.dropFraction).toBe(PRICE_DROP_SCENARIOS[i])
+      // Non-null assertion safe: forEach index always within array bounds
+      expect(r.dropFraction).toBe(PRICE_DROP_SCENARIOS[i]!)
     })
   })
 

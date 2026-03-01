@@ -166,23 +166,20 @@ describe('computeUnifiedHealthFactor', () => {
     expect(computeUnifiedHealthFactor([aavePos], pricesWithoutCanonical)).toBeCloseTo(2.475, 10)
   })
 
-  it('resolves checksummed address identically to lowercase', () => {
-    // resolvePrice normalises to toLowerCase() before lookup.
-    // A checksummed address must produce the same UHF as lowercase.
-    const checksummedPrices: PriceMap = buildPriceMap({
-      [ETH.toUpperCase()]: 3_000n * W,
-      [USDC.toUpperCase()]: W,
-    })
-    // lowercase PRICES → UHF 2.475
-    // uppercase map keys: resolvePrice lowercases before lookup
-    // So checksummedPrices[ETH.toLowerCase()] returns the same value
+  it('resolves checksummed position addresses against lowercase PriceMap', () => {
+    // Real-world scenario: an API returns checksummed token addresses in the
+    // position data (e.g. 0xC02Aaa...) while the PriceMap is built with all-
+    // lowercase keys. resolvePrice normalises the position's asset address to
+    // lowercase before map lookup, so the price is found correctly.
     const posWithChecksummed: PositionData = {
       ...STANDARD,
-      collateralAsset: ETH.toUpperCase(), // checksummed input
+      collateralAsset: ETH.toUpperCase(), // checksummed input from API
       debtAsset: USDC.toUpperCase(),
     }
+    // Both positions use the same PRICES map (lowercase keys).
+    // resolvePrice lowercases the asset address before lookup → same price found.
     const uhfLowercase = computeUnifiedHealthFactor([STANDARD], PRICES)
-    const uhfChecksummed = computeUnifiedHealthFactor([posWithChecksummed], checksummedPrices)
+    const uhfChecksummed = computeUnifiedHealthFactor([posWithChecksummed], PRICES)
     expect(uhfChecksummed).toBeCloseTo(uhfLowercase, 10)
   })
 
