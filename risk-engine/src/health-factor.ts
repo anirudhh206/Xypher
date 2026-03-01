@@ -1,78 +1,14 @@
 
-// UHF solves this. It uses the same formula as Aave's health
-// factor but applied to the entire cross-chain, cross-protocol
-// position set:
-//
-//   UHF = Σ(collateral_i × price_i × liqThreshold_i)
-//         ─────────────────────────────────────────────
-//                  Σ(debt_j × price_j)
-//
-// ── Arithmetic Model ──────────────────────────────────────────
-//
-// All intermediate values use bigint to eliminate floating
-// point rounding errors from financial calculations.
-//
-// Price representation: 1 USD = WEI_PER_TOKEN (1e18).
-//   ETH at $3,000 → 3_000 × 1e18 = 3_000_000_000_000_000_000_000n
-//
-// Collateral USD value (in 1e18-scaled USD):
-//   collateralUSD = collateralAmount × price / WEI_PER_TOKEN
-//
-// Liquidation adjustment (4 basis-point precision):
-//   adjustedCollateral = collateralUSD × round(threshold × 10_000) / 10_000n
-//
-// Final conversion to Number:
-//   UHF = Number(totalAdjustedCollateral) / Number(totalDebt)
-//   Both are in the same 1e18-scaled USD unit, so the ratio
-//   is dimensionless and safe to express as a float.
-//
-// ── Missing Price Handling ────────────────────────────────────
-//
-// If a position's price is absent from the PriceMap:
-//   - Collateral contribution → 0 (no value without a price)
-//   - Debt contribution → counted at face value (conservative)
-// This ensures missing prices always reduce UHF, never inflate it.
-// The CRE workflow must include prices for all assets in positions.
-// CANONICAL_USD_ASSET should always be in the PriceMap at WEI_PER_TOKEN.
-//
-// Zero external dependencies. Pure TypeScript. No `any`.
-// Runs inside TEE enclave — no I/O, no side effects.
-// ============================================================
-
 import {
   CANONICAL_USD_ASSET,
   WEI_PER_TOKEN,
   type PositionData,
   type PriceMap,
 } from './types'
-
-// ============================================================
-// PRECISION CONSTANTS
-// ============================================================
-
-/**
- * Basis points multiplier for liquidation threshold conversion.
- * Converts a fraction (0.825) to basis points (8250) for bigint math.
- * 4 decimal places covers all known protocol liquidation thresholds.
- */
 const LIQUIDATION_THRESHOLD_PRECISION = 10_000
 const LIQUIDATION_THRESHOLD_PRECISION_BIG = 10_000n
 
-/**
- * Sentinel value returned when a portfolio has no debt.
- * Mathematically correct: a position with collateral but zero debt
- * has infinite margin of safety.
- */
 export const INFINITE_HEALTH_FACTOR = Infinity
-
-// ============================================================
-// PRICE LOOKUP
-// Resolves a token price from the PriceMap with a defined
-// fallback for missing entries.
-//
-// With noUncheckedIndexedAccess: true, PriceMap access returns
-// bigint | undefined. Missing prices → 0n (conservative fallback).
-// ============================================================
 
 function resolvePrice(prices: PriceMap, asset: string): bigint {
   // Always normalise to lowercase before any lookup or comparison.
