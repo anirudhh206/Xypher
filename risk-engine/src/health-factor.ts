@@ -75,11 +75,19 @@ export const INFINITE_HEALTH_FACTOR = Infinity
 // ============================================================
 
 function resolvePrice(prices: PriceMap, asset: string): bigint {
-  // CANONICAL_USD_ASSET is always $1 — inject if missing from map
-  if (asset === CANONICAL_USD_ASSET) {
+  // Always normalise to lowercase before any lookup or comparison.
+  // Prevents consensus failures when one API returns a checksummed
+  // address (0xABC...) while another returns lowercase (0xabc...).
+  // Both must resolve identically inside the TEE — the comparison
+  // branch must be deterministic regardless of input casing.
+  const target = asset.toLowerCase()
+
+  // CANONICAL_USD_ASSET is always $1.00 — inject if absent from map
+  if (target === CANONICAL_USD_ASSET) {
     return prices[CANONICAL_USD_ASSET] ?? WEI_PER_TOKEN
   }
-  return prices[asset.toLowerCase()] ?? 0n
+
+  return prices[target] ?? 0n
 }
 
 // ============================================================

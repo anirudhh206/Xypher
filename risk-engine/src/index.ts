@@ -54,6 +54,7 @@ export {
   DSS_THRESHOLD_TIER_3,
   DSS_THRESHOLD_TIER_4,
   DSS_MAX,
+  NEUTRAL_DSS,
 
   // Numeric constants
   WEI_PER_TOKEN,
@@ -71,6 +72,7 @@ export {
   ADAPTER_ERROR_CODES,
 } from './types'
 
+// ── Data Adapters ─────────────────────────────────────────────
 export { AaveAdapter } from './adapters/aave.adapter'
 export type { AaveAdapterOptions } from './adapters/aave.adapter'
 
@@ -81,3 +83,32 @@ export { CompoundAdapter } from './adapters/compound.adapter'
 export type { CompoundAdapterOptions } from './adapters/compound.adapter'
 
 export { PlaidAdapter } from './adapters/plaid.adapter'
+
+// ── Risk Engine ───────────────────────────────────────────────
+export {
+  computeUnifiedHealthFactor,
+  computePositionHealthFactor,
+  isLiquidatable,
+  computeTotalCollateralUSD,
+  computeTotalDebtUSD,
+  buildPriceMap,
+} from './health-factor'
+
+export {
+  applyPriceShock,
+  simulatePriceShocks,
+  computeCascadeThreshold,
+  computeContagionRisk,
+} from './contagion-model'
+export type { ShockResult, ContagionRisk } from './contagion-model'
+
+export { computeDebtServiceability } from './debt-serviceability'
+export type { DebtServiceability } from './debt-serviceability'
+
+export {
+  computeCreditScore,
+  getTier,
+  isUndercollateralizedEligible,
+  isAtRisk,
+} from './credit-score'
+export type { CreditScoreDetails } from './credit-score'

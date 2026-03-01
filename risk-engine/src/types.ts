@@ -26,6 +26,8 @@ export const DSS_THRESHOLD_TIER_2 = 75
 export const DSS_THRESHOLD_TIER_3 = 60
 export const DSS_THRESHOLD_TIER_4 = 40
 export const DSS_MAX = 100
+/** Neutral DSS returned when no usable Plaid data is available (not an adverse finding) */
+export const NEUTRAL_DSS = 50
 
 /** 1e18 — standard 18-decimal ERC-20 token unit in wei */
 export const WEI_PER_TOKEN = 1_000_000_000_000_000_000n
