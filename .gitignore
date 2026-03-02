@@ -6,6 +6,14 @@ node_modules/
 dist/
 *.wasm
 
+# Hardhat build outputs (generated — do not commit)
+contracts/artifacts/
+contracts/cache/
+contracts/typechain-types/
+
+# Claude internal memory
+.claude/
+
 # Environment — NEVER commit
 .env
 

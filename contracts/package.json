@@ -1,0 +1,28 @@
+{
+  "name": "@confidential-guard/contracts",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "compile":  "hardhat compile",
+    "test":     "hardhat test",
+    "coverage": "hardhat coverage",
+    "deploy:sepolia":      "hardhat run scripts/deploy.ts --network sepolia",
+    "deploy:base-sepolia": "hardhat run scripts/deploy.ts --network base-sepolia",
+    "verify":   "hardhat verify",
+    "slither":  "slither . --config-file slither.config.json",
+    "clean":    "hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@types/node": "^20.0.0",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0",
+    "dotenv": "^16.4.0"
+  },
+  "dependencies": {
+    "@chainlink/contracts": "^1.2.0",
+    "@chainlink/contracts-ccip": "^1.4.0",
+    "@openzeppelin/contracts": "^5.0.2"
+  }
+}
