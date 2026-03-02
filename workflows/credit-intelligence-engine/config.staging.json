@@ -1,6 +1,11 @@
 {
-  "schedule": "*/5 * * * *",
+  "attestationContractAddress": "0x0000000000000000000000000000000000000000",
+  "chainSelectorName": "ethereum-testnet-sepolia",
   "aaveApiUrl": "https://aave-api-v2.aave.com",
-  "testWalletAddress": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-  "chainSelectorName": "ethereum-testnet-sepolia"
+  "morphoApiUrl": "https://api.morpho.org",
+  "compoundApiUrl": "https://api.compound.finance",
+  "plaidApiUrl": "https://sandbox.plaid.com",
+  "plaidSecretKey": "plaid_credentials",
+  "plaidSecretNamespace": "confidential-guard",
+  "guardianSchedule": "0 */5 * * * *"
 }
