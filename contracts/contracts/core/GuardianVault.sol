@@ -28,7 +28,8 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
   mapping(address lender => bool trusted) public trustedLenders;
   mapping(uint64 chainSelector => bool allowed) public allowedDestinationChains;
   mapping(uint64 chainSelector => address receiver) public destinationReceivers;
-  mapping(address caller => uint256 amount) public pendingRefunds;
+  /// @notice ETH balance reserved for CCIP fees. Funded via fundGuardianPool().
+  uint256 public guardianPool;
 
   constructor(
     address _ccipRouter,
@@ -59,6 +60,16 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
   function setTrustedLender(address lender, bool trusted) external onlyOwner {
     trustedLenders[lender] = trusted;
     emit TrustedLenderUpdated(lender, trusted);
+  }
+
+  /**
+   * @notice Deposits ETH into the guardian pool to pay future CCIP fees.
+   * @dev Only owner. Allows the CRE automation workflow to trigger guardian
+   *      actions without sending ETH — the vault covers CCIP fees from this pool.
+   */
+  function fundGuardianPool() external payable override onlyOwner {
+    guardianPool += msg.value;
+    emit GuardianPoolFunded(msg.value);
   }
   function depositCollateral(
     address token,
@@ -114,10 +125,16 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
     uint256 hf = _computeHealthFactorWithCollateral(pos.collateralAmount, debtAmountUSD);
     emit HealthFactorUpdated(user, hf);
   }
+  /**
+   * @notice Dispatches a CCIP guardian action for a user's position.
+   * @dev Called by the CRE guardian-monitor workflow (no msg.value required).
+   *      CCIP fees are paid from guardianPool — funded by owner via fundGuardianPool().
+   *      Effects before interactions: state is written before ccipSend (CEI).
+   */
   function triggerGuardianAction(
     address user,
     uint64  destinationChain
-  ) external payable override nonReentrant {
+  ) external override nonReentrant {
     if (!allowedDestinationChains[destinationChain]) {
       revert InvalidChainSelector(destinationChain);
     }
@@ -137,10 +154,12 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
       revert PositionHealthy(user, currentHF, GUARDIAN_HF_THRESHOLD);
     }
 
+    // ── Effects ───────────────────────────────────────────────────────────
     pos.lastHealthCheck     = now_;
     pos.lastGuardianTrigger = now_;
     emit HealthFactorUpdated(user, currentHF);
 
+    // ── Build CCIP message ────────────────────────────────────────────────
     address receiver = destinationReceivers[destinationChain];
     Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
       receiver:     abi.encode(receiver),
@@ -149,31 +168,18 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
       extraArgs:    Client._argsToBytes(
         Client.EVMExtraArgsV1({ gasLimit: CCIP_GAS_LIMIT })
       ),
-      feeToken:     address(0)  // Pay CCIP fee in native ETH
+      feeToken:     address(0)  // Pay CCIP fee in native ETH from guardianPool
     });
-    uint256 fee = ccipRouter.getFee(destinationChain, message);
-    if (msg.value < fee) revert InsufficientFeeProvided(msg.value, fee);
 
+    // ── Validate pool balance ─────────────────────────────────────────────
+    uint256 fee = ccipRouter.getFee(destinationChain, message);
+    if (guardianPool < fee) revert InsufficientGuardianPool(guardianPool, fee);
+
+    // ── Interaction: deduct pool, send CCIP ───────────────────────────────
+    guardianPool -= fee;
     bytes32 messageId = ccipRouter.ccipSend{value: fee}(destinationChain, message);
 
     emit GuardianActionTriggered(user, destinationChain, messageId);
-
-    uint256 excess = msg.value - fee;
-    if (excess > 0) {
-      pendingRefunds[msg.sender] += excess;
-      emit RefundPending(msg.sender, excess);
-    }
-  }
-
-  function withdrawRefund() external override nonReentrant {
-    uint256 amount = pendingRefunds[msg.sender];
-    if (amount == 0) revert NoRefundPending();
-
-    // Effects before interaction.
-    pendingRefunds[msg.sender] = 0;
-
-    (bool ok, ) = msg.sender.call{value: amount}("");
-    require(ok, "Refund transfer failed");
   }
 
   function getHealthFactor(address user) external view override returns (uint256 healthFactor) {

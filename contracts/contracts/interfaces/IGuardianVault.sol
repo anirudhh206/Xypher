@@ -63,9 +63,8 @@ interface IGuardianVault {
   /// @notice Emitted when a destination chain is added or removed.
   event DestinationChainUpdated(uint64 indexed chainSelector, bool allowed, address receiver);
 
-  /// @notice Emitted when excess CCIP fee ETH is stored for the caller to pull.
-  /// @dev Using pull-over-push to avoid guardian actions failing if caller has no receive().
-  event RefundPending(address indexed caller, uint256 amount);
+  /// @notice Emitted when the owner funds the guardian ETH pool for CCIP fees.
+  event GuardianPoolFunded(uint256 amount);
 
   /// @notice Emitted when a trusted lender is added or removed.
   event TrustedLenderUpdated(address indexed lender, bool trusted);
@@ -92,14 +91,11 @@ interface IGuardianVault {
   /// @notice ERC20 token is not supported as collateral.
   error UnsupportedToken(address token);
 
-  /// @notice Caller has no pending ETH refund to withdraw.
-  error NoRefundPending();
-
   /// @notice Position health factor is above the guardian threshold — action not needed.
   error PositionHealthy(address user, uint256 healthFactor, uint256 minimum);
 
-  /// @notice msg.value is insufficient to cover the CCIP fee.
-  error InsufficientFeeProvided(uint256 sent, uint256 required);
+  /// @notice Vault's ETH pool is insufficient to cover the CCIP fee.
+  error InsufficientGuardianPool(uint256 available, uint256 required);
 
   /// @notice Guardian was triggered too recently — cooldown has not elapsed.
   error GuardianCooldownActive(address user, uint64 cooldownEndsAt);
@@ -143,22 +139,23 @@ interface IGuardianVault {
   function setTrustedLender(address lender, bool trusted) external;
 
   /**
+   * @notice Funds the vault's internal ETH pool used to pay CCIP fees.
+   * @dev Only callable by owner. Pre-funding allows the CRE automation workflow
+   *      to call triggerGuardianAction() without sending ETH — the vault pays
+   *      CCIP fees from this pool.
+   */
+  function fundGuardianPool() external payable;
+
+  /**
    * @notice Dispatches a CCIP guardian action for a user's position.
-   * @dev Called by automation (Chainlink Automation or keeper) when HF drops.
+   * @dev Called by the CRE guardian-monitor workflow when HF drops below 1.0.
+   *      Uses the vault's internal ETH pool (funded via fundGuardianPool) for
+   *      CCIP fees — no msg.value required from the caller.
    *      Validates that the position is actually below the guardian threshold.
    * @param user             Address of the position owner.
    * @param destinationChain CCIP chain selector of the target chain.
    */
-  function triggerGuardianAction(address user, uint64 destinationChain) external payable;
-
-  /**
-   * @notice Withdraws any excess CCIP fee ETH owed to the caller.
-   * @dev Pull-over-push pattern: excess refunds from triggerGuardianAction are
-   *      stored in pendingRefunds[msg.sender] and claimed here instead of being
-   *      pushed during the guardian action call. This ensures that automation
-   *      bots (which may not have a receive() function) do not get blocked.
-   */
-  function withdrawRefund() external;
+  function triggerGuardianAction(address user, uint64 destinationChain) external;
 
   // ─────────────────────────────────────────────────────────────────────
   // View functions

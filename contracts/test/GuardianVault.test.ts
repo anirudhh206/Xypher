@@ -5,15 +5,17 @@
 // Coverage target: >95% lines, branches, functions, statements
 //
 // Verified invariants:
-//   1. ETH deposits increase collateralAmount correctly
-//   2. Withdrawals revert if resulting HF < guardian threshold (1.2)
-//   3. triggerGuardianAction sends CCIP message with correct payload
-//   4. Only allowed destination chains are accepted
-//   5. checkGuardianCondition returns true iff HF < 1.2
-//   6. Price feed staleness revert propagates correctly
-//   7. Zero-debt positions have infinite HF (never trigger guardian)
-//   8. Pull-over-push refund: excess CCIP fee stored in pendingRefunds
-//   9. withdrawRefund() pulls pending ETH; NoRefundPending if none
+//   1.  ETH deposits increase collateralAmount correctly
+//   2.  Withdrawals revert if resulting HF < guardian threshold (1.2)
+//   3.  triggerGuardianAction sends CCIP message via guardianPool (no msg.value)
+//   4.  Only allowed destination chains are accepted
+//   5.  checkGuardianCondition returns true iff HF < 1.2
+//   6.  Price feed staleness revert propagates correctly
+//   7.  Zero-debt positions have infinite HF (never trigger guardian)
+//   8.  setDebtAmount is only callable by trusted lenders (onlyTrustedLender)
+//   9.  fundGuardianPool accumulates ETH; InsufficientGuardianPool if underfunded
+//   10. triggerGuardianAction has a per-user 5-minute cooldown
+//   11. PositionHealthy error if position is healthy when guardian triggered
 // ============================================================
 
 import { expect }    from 'chai'
@@ -23,13 +25,18 @@ import type { GuardianVault, MockPriceFeed, MockCCIPRouter } from '../typechain-
 
 // ETH/USD = $3,000 at 8 decimals (standard Chainlink format)
 const ETH_PRICE_8DEC = 300_000_000_000n   // $3,000 × 1e8
-const ETH_USD_1E18   = 3_000n * 10n ** 18n
 
 // 1 ether in wei
 const ONE_ETH = ethers.parseEther('1')
 
-// CCIP fee
+// CCIP fee charged by the mock router
 const CCIP_FEE = ethers.parseEther('0.01')
+
+// Pool pre-funded for CCIP fees
+const POOL_FUND = ethers.parseEther('1')
+
+// 5 minutes in seconds (GUARDIAN_COOLDOWN constant)
+const FIVE_MINUTES = 300
 
 // Base Sepolia chain selector (Chainlink official)
 const BASE_SEPOLIA_SELECTOR = 10344971235874465080n
@@ -41,7 +48,7 @@ describe('GuardianVault', function () {
   let owner:       HardhatEthersSigner
   let user1:       HardhatEthersSigner
   let user2:       HardhatEthersSigner
-  let keeper:      HardhatEthersSigner
+  let keeper:      HardhatEthersSigner   // registered as trustedLender in beforeEach
   let receiver:    HardhatEthersSigner
 
   beforeEach(async function () {
@@ -72,6 +79,12 @@ describe('GuardianVault', function () {
       true,
       receiver.address
     )
+
+    // Register keeper as trusted lender — required for setDebtAmount
+    await vault.connect(owner).setTrustedLender(keeper.address, true)
+
+    // Pre-fund guardian pool so triggerGuardianAction doesn't need msg.value
+    await vault.connect(owner).fundGuardianPool({ value: POOL_FUND })
   })
 
   // ─────────────────────────────────────────────────────────────
@@ -103,6 +116,82 @@ describe('GuardianVault', function () {
       await expect(
         factory.deploy(await ccipRouter.getAddress(), ethers.ZeroAddress, owner.address)
       ).to.be.revertedWithCustomError(vault, 'UnauthorizedCaller')
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────
+  // fundGuardianPool (admin)
+  // ─────────────────────────────────────────────────────────────
+
+  describe('fundGuardianPool', () => {
+    it('increases guardianPool balance', async () => {
+      const before = await vault.guardianPool()
+      await vault.connect(owner).fundGuardianPool({ value: ONE_ETH })
+      expect(await vault.guardianPool()).to.equal(before + ONE_ETH)
+    })
+
+    it('emits GuardianPoolFunded', async () => {
+      await expect(vault.connect(owner).fundGuardianPool({ value: ONE_ETH }))
+        .to.emit(vault, 'GuardianPoolFunded')
+        .withArgs(ONE_ETH)
+    })
+
+    it('reverts for non-owner', async () => {
+      await expect(
+        vault.connect(user1).fundGuardianPool({ value: ONE_ETH })
+      ).to.be.revertedWithCustomError(vault, 'OwnableUnauthorizedAccount')
+    })
+
+    it('reverts when pool has insufficient balance for CCIP fee', async () => {
+      // Deploy a fresh vault with empty pool
+      const VaultFactory = await ethers.getContractFactory('GuardianVault')
+      const emptyVault = await VaultFactory.deploy(
+        await ccipRouter.getAddress(),
+        await priceFeed.getAddress(),
+        owner.address
+      )
+      await emptyVault.waitForDeployment()
+      await emptyVault.connect(owner).setDestinationChain(BASE_SEPOLIA_SELECTOR, true, receiver.address)
+      await emptyVault.connect(owner).setTrustedLender(keeper.address, true)
+
+      // Set up at-risk position
+      await emptyVault.connect(user1).depositCollateral(
+        ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
+      )
+      await emptyVault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2500'))
+
+      // Pool is empty — should revert
+      await expect(
+        emptyVault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      ).to.be.revertedWithCustomError(emptyVault, 'InsufficientGuardianPool')
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────
+  // setTrustedLender (admin)
+  // ─────────────────────────────────────────────────────────────
+
+  describe('setTrustedLender', () => {
+    it('registers a trusted lender', async () => {
+      await vault.connect(owner).setTrustedLender(user2.address, true)
+      expect(await vault.trustedLenders(user2.address)).to.be.true
+    })
+
+    it('revokes a trusted lender', async () => {
+      await vault.connect(owner).setTrustedLender(keeper.address, false)
+      expect(await vault.trustedLenders(keeper.address)).to.be.false
+    })
+
+    it('emits TrustedLenderUpdated', async () => {
+      await expect(vault.connect(owner).setTrustedLender(user2.address, true))
+        .to.emit(vault, 'TrustedLenderUpdated')
+        .withArgs(user2.address, true)
+    })
+
+    it('reverts for non-owner', async () => {
+      await expect(
+        vault.connect(user1).setTrustedLender(user2.address, true)
+      ).to.be.revertedWithCustomError(vault, 'OwnableUnauthorizedAccount')
     })
   })
 
@@ -140,7 +229,7 @@ describe('GuardianVault', function () {
     })
 
     it('reverts for non-ETH token (ERC20 not supported)', async () => {
-      const fakeToken = user1.address // any non-zero address
+      const fakeToken = user1.address
       await expect(
         vault.connect(user1).depositCollateral(fakeToken, ONE_ETH, { value: ONE_ETH })
       ).to.be.revertedWithCustomError(vault, 'UnsupportedToken')
@@ -157,13 +246,13 @@ describe('GuardianVault', function () {
   })
 
   // ─────────────────────────────────────────────────────────────
-  // setDebtAmount
+  // setDebtAmount (onlyTrustedLender)
   // ─────────────────────────────────────────────────────────────
 
   describe('setDebtAmount', () => {
-    it('stores debt amount correctly', async () => {
-      const debtUSD = ethers.parseEther('2000')  // $2,000 in 1e18
-      await vault.connect(user1).setDebtAmount(debtUSD)
+    it('stores debt amount correctly when called by trusted lender', async () => {
+      const debtUSD = ethers.parseEther('2000')
+      await vault.connect(keeper).setDebtAmount(user1.address, debtUSD)
       const pos = await vault.getVaultPosition(user1.address)
       expect(pos.debtAmount).to.equal(debtUSD)
     })
@@ -173,9 +262,21 @@ describe('GuardianVault', function () {
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
       const debtUSD = ethers.parseEther('2000')
-      await expect(vault.connect(user1).setDebtAmount(debtUSD))
+      await expect(vault.connect(keeper).setDebtAmount(user1.address, debtUSD))
         .to.emit(vault, 'HealthFactorUpdated')
-        .withArgs(user1.address, ethers.anything ?? (() => true))
+        .withArgs(user1.address, 1237500000000000000n)  // 1 ETH @ $3000 × 0.825 / $2000 = 1.2375
+    })
+
+    it('reverts when called by untrusted address', async () => {
+      await expect(
+        vault.connect(user1).setDebtAmount(user1.address, ethers.parseEther('1000'))
+      ).to.be.revertedWithCustomError(vault, 'UnauthorizedCaller')
+    })
+
+    it('reverts when called by owner who is not a trusted lender', async () => {
+      await expect(
+        vault.connect(owner).setDebtAmount(user1.address, ethers.parseEther('1000'))
+      ).to.be.revertedWithCustomError(vault, 'UnauthorizedCaller')
     })
   })
 
@@ -193,36 +294,31 @@ describe('GuardianVault', function () {
     })
 
     it('returns 0 for zero-collateral position with debt', async () => {
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('1000'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('1000'))
       const hf = await vault.getHealthFactor(user1.address)
       expect(hf).to.equal(0n)
     })
 
     it('computes correct HF for ETH collateral at $3,000', async () => {
       // 1 ETH × $3,000 × 0.825 / $2,000 = $2,475 / $2,000 = 1.2375
-      // In 1e18: 1237500000000000000
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2000'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2000'))
       const hf = await vault.getHealthFactor(user1.address)
-
-      // adjustedCollateral = 1e18 × 3000e18 / 1e18 × 8250 / 10000 = 2475e18
-      // HF = 2475e18 × 1e18 / 2000e18 = 1.2375e18
-      const expectedHF = 1237500000000000000n
-      expect(hf).to.equal(expectedHF)
+      expect(hf).to.equal(1237500000000000000n)
     })
 
     it('HF decreases when ETH price drops', async () => {
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2000'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2000'))
 
       const hfBefore = await vault.getHealthFactor(user1.address)
 
       // Drop ETH price to $2,000
-      await priceFeed.setPrice(200_000_000_000n) // $2,000 at 8 dec
+      await priceFeed.setPrice(200_000_000_000n)
       const hfAfter = await vault.getHealthFactor(user1.address)
 
       expect(hfAfter).to.be.lessThan(hfBefore)
@@ -259,12 +355,11 @@ describe('GuardianVault', function () {
     })
 
     it('reverts if withdrawal would drop HF below guardian threshold', async () => {
-      // Set debt such that HF is just above 1.2 with 5 ETH
-      // 5 ETH × $3,000 × 0.825 = $12,375 / debt = 1.2 → debt = $10,312.5
+      // 5 ETH × $3,000 × 0.825 / $10,312 ≈ 1.2 — just above threshold with 5 ETH
       const debt = ethers.parseEther('10312')
-      await vault.connect(user1).setDebtAmount(debt)
+      await vault.connect(keeper).setDebtAmount(user1.address, debt)
 
-      // Remove 4 ETH → 1 ETH × $3,000 × 0.825 = $2,475 / $10,312 ≈ 0.24 < 1.2
+      // Remove 4 ETH → HF ≈ 0.24 < 1.2
       await expect(
         vault.connect(user1).withdrawCollateral(ethers.ZeroAddress, ethers.parseEther('4'))
       ).to.be.revertedWithCustomError(vault, 'HealthFactorTooLow')
@@ -296,20 +391,20 @@ describe('GuardianVault', function () {
     })
 
     it('returns false when HF >= 1.2 (healthy position)', async () => {
-      // 10 ETH × $3,000 × 0.825 / $20,000 = $24,750 / $20,000 = 1.2375 > 1.2
+      // 10 ETH × $3,000 × 0.825 / $20,000 = 1.2375 > 1.2
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ethers.parseEther('10'), { value: ethers.parseEther('10') }
       )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('20000'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('20000'))
       expect(await vault.checkGuardianCondition(user1.address)).to.be.false
     })
 
     it('returns true when HF < 1.2 (guardian needed)', async () => {
-      // 1 ETH × $3,000 × 0.825 / $2,500 = $2,475 / $2,500 = 0.99 < 1.2
+      // 1 ETH × $3,000 × 0.825 / $2,500 = 0.99 < 1.2
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2500'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2500'))
       expect(await vault.checkGuardianCondition(user1.address)).to.be.true
     })
   })
@@ -320,20 +415,15 @@ describe('GuardianVault', function () {
 
   describe('triggerGuardianAction', () => {
     beforeEach(async () => {
-      // Set up a position that needs guardian action: HF < 1.2
+      // Set up at-risk position: HF = 0.99 < 1.2
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
-      // $2,500 debt → HF = 2475/2500 = 0.99 < 1.2
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2500'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2500'))
     })
 
     it('emits GuardianActionTriggered with correct user and chain', async () => {
-      // Parse the messageId from the emitted event (generated inside the tx,
-      // so it cannot be read from router.lastMessageId() before the call).
-      const tx      = await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: ethers.parseEther('0.05') }
-      )
+      const tx      = await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
       const receipt = await tx.wait()
       const log     = receipt!.logs
         .map(l => { try { return vault.interface.parseLog(l as Parameters<typeof vault.interface.parseLog>[0]) } catch { return null } })
@@ -342,79 +432,62 @@ describe('GuardianVault', function () {
       expect(log).to.not.be.null
       expect(log!.args[0]).to.equal(user1.address)
       expect(log!.args[1]).to.equal(BASE_SEPOLIA_SELECTOR)
-      expect(log!.args[2]).to.not.equal(ethers.ZeroHash)  // messageId was generated
+      expect(log!.args[2]).to.not.equal(ethers.ZeroHash)
     })
 
     it('sends CCIP message via router', async () => {
       const countBefore = await ccipRouter.messageCount()
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: ethers.parseEther('0.05') }
-      )
+      await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
       const countAfter = await ccipRouter.messageCount()
       expect(countAfter).to.equal(countBefore + 1n)
+    })
+
+    it('deducts CCIP fee from guardianPool', async () => {
+      const poolBefore = await vault.guardianPool()
+      await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      const poolAfter = await vault.guardianPool()
+      expect(poolBefore - poolAfter).to.equal(CCIP_FEE)
     })
 
     it('reverts for disallowed destination chain', async () => {
       const unknownChain = 999999999n
       await expect(
-        vault.connect(keeper).triggerGuardianAction(
-          user1.address, unknownChain, { value: ethers.parseEther('0.05') }
-        )
+        vault.connect(keeper).triggerGuardianAction(user1.address, unknownChain)
       ).to.be.revertedWithCustomError(vault, 'InvalidChainSelector')
     })
 
-    it('reverts when position HF is above guardian threshold', async () => {
-      // user2: healthy position (HF >> 1.2)
+    it('reverts with PositionHealthy when HF is above guardian threshold', async () => {
+      // user2: healthy (HF >> 1.2)
       await vault.connect(user2).depositCollateral(
         ethers.ZeroAddress, ethers.parseEther('10'), { value: ethers.parseEther('10') }
       )
-      await vault.connect(user2).setDebtAmount(ethers.parseEther('1000'))
+      await vault.connect(keeper).setDebtAmount(user2.address, ethers.parseEther('1000'))
 
       await expect(
-        vault.connect(keeper).triggerGuardianAction(
-          user2.address, BASE_SEPOLIA_SELECTOR, { value: ethers.parseEther('0.05') }
-        )
-      ).to.be.revertedWithCustomError(vault, 'HealthFactorTooLow')
+        vault.connect(keeper).triggerGuardianAction(user2.address, BASE_SEPOLIA_SELECTOR)
+      ).to.be.revertedWithCustomError(vault, 'PositionHealthy')
     })
 
-    it('stores excess ETH in pendingRefunds (pull-over-push)', async () => {
-      // Pull-over-push: excess CCIP fee is NOT pushed to caller during the call.
-      // It is stored in pendingRefunds so automation bots without receive() still work.
-      const excess = ethers.parseEther('0.09')
-      const sent   = CCIP_FEE + excess
+    it('reverts with GuardianCooldownActive if triggered again within 5 minutes', async () => {
+      // First trigger succeeds
+      await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
 
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: sent }
-      )
-
-      // Excess must be stored, not pushed.
-      expect(await vault.pendingRefunds(keeper.address)).to.equal(excess)
+      // Immediate re-trigger: cooldown not elapsed
+      await expect(
+        vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      ).to.be.revertedWithCustomError(vault, 'GuardianCooldownActive')
     })
 
-    it('emits RefundPending event for excess CCIP fee', async () => {
-      const excess = ethers.parseEther('0.09')
-      const sent   = CCIP_FEE + excess
+    it('allows re-trigger after cooldown elapses', async () => {
+      await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+
+      // Advance 5 minutes
+      await ethers.provider.send('evm_increaseTime', [FIVE_MINUTES])
+      await ethers.provider.send('evm_mine', [])
 
       await expect(
-        vault.connect(keeper).triggerGuardianAction(
-          user1.address, BASE_SEPOLIA_SELECTOR, { value: sent }
-        )
-      ).to.emit(vault, 'RefundPending')
-        .withArgs(keeper.address, excess)
-    })
-
-    it('does NOT emit RefundPending when msg.value == CCIP fee exactly', async () => {
-      const tx = await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE }
-      )
-      const receipt = await tx.wait()
-      const refundLogs = receipt!.logs.filter(log => {
-        try {
-          const parsed = vault.interface.parseLog(log as Parameters<typeof vault.interface.parseLog>[0])
-          return parsed?.name === 'RefundPending'
-        } catch { return false }
-      })
-      expect(refundLogs.length).to.equal(0)
+        vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      ).to.not.be.reverted
     })
   })
 
@@ -449,85 +522,6 @@ describe('GuardianVault', function () {
   })
 
   // ─────────────────────────────────────────────────────────────
-  // withdrawRefund (pull-over-push pattern)
-  // ─────────────────────────────────────────────────────────────
-
-  describe('withdrawRefund', () => {
-    beforeEach(async () => {
-      // Set up an at-risk position for keeper to trigger.
-      await vault.connect(user1).depositCollateral(
-        ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
-      )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2500'))
-    })
-
-    it('transfers pending refund to caller', async () => {
-      const excess = ethers.parseEther('0.05')
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE + excess }
-      )
-      expect(await vault.pendingRefunds(keeper.address)).to.equal(excess)
-
-      const balanceBefore = await ethers.provider.getBalance(keeper.address)
-      const tx     = await vault.connect(keeper).withdrawRefund()
-      const receipt = await tx.wait()
-      const gasCost = receipt!.gasUsed * receipt!.gasPrice
-      const balanceAfter = await ethers.provider.getBalance(keeper.address)
-
-      // Net: received excess, paid gas
-      expect(balanceAfter - balanceBefore).to.be.closeTo(
-        excess - gasCost,
-        ethers.parseEther('0.0001')
-      )
-    })
-
-    it('clears pendingRefunds after withdrawal', async () => {
-      const excess = ethers.parseEther('0.05')
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE + excess }
-      )
-      await vault.connect(keeper).withdrawRefund()
-      expect(await vault.pendingRefunds(keeper.address)).to.equal(0n)
-    })
-
-    it('accumulates multiple refunds before withdrawal', async () => {
-      const excess = ethers.parseEther('0.05')
-      // Trigger twice (using different users to avoid HF re-check issue)
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE + excess }
-      )
-      // Set up user2 at-risk position
-      await vault.connect(user2).depositCollateral(
-        ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
-      )
-      await vault.connect(user2).setDebtAmount(ethers.parseEther('2500'))
-      await vault.connect(keeper).triggerGuardianAction(
-        user2.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE + excess }
-      )
-      expect(await vault.pendingRefunds(keeper.address)).to.equal(excess * 2n)
-    })
-
-    it('reverts with NoRefundPending when caller has no pending refund', async () => {
-      await expect(
-        vault.connect(keeper).withdrawRefund()
-      ).to.be.revertedWithCustomError(vault, 'NoRefundPending')
-    })
-
-    it('reverts with NoRefundPending after already withdrawing', async () => {
-      const excess = ethers.parseEther('0.05')
-      await vault.connect(keeper).triggerGuardianAction(
-        user1.address, BASE_SEPOLIA_SELECTOR, { value: CCIP_FEE + excess }
-      )
-      await vault.connect(keeper).withdrawRefund()
-
-      // Second withdrawal must revert.
-      await expect(
-        vault.connect(keeper).withdrawRefund()
-      ).to.be.revertedWithCustomError(vault, 'NoRefundPending')
-    })
-  })
-
-  // ─────────────────────────────────────────────────────────────
   // Stale price feed
   // ─────────────────────────────────────────────────────────────
 
@@ -536,7 +530,7 @@ describe('GuardianVault', function () {
       await vault.connect(user1).depositCollateral(
         ethers.ZeroAddress, ONE_ETH, { value: ONE_ETH }
       )
-      await vault.connect(user1).setDebtAmount(ethers.parseEther('2000'))
+      await vault.connect(keeper).setDebtAmount(user1.address, ethers.parseEther('2000'))
 
       // Set updatedAt to 2 hours ago
       await priceFeed.setUpdatedAt(Math.floor(Date.now() / 1000) - 7_200)

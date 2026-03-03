@@ -1,0 +1,16 @@
+{
+  "sepolia": {
+    "attestation": null,
+    "vault": null,
+    "deployer": null,
+    "deployedAt": null,
+    "attestationBlock": null,
+    "vaultBlock": null
+  },
+  "baseSepolia": {
+    "receiver": null,
+    "deployer": null,
+    "deployedAt": null,
+    "receiverBlock": null
+  }
+}

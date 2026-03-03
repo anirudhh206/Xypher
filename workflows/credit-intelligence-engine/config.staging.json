@@ -1,8 +1,10 @@
 {
   "attestationContractAddress": "0x0000000000000000000000000000000000000000",
+  "guardianVaultAddress": "0x0000000000000000000000000000000000000000",
   "chainSelectorName": "ethereum-testnet-sepolia",
+  "ccipDestinationChain": "ethereum-testnet-sepolia-base-1",
   "aaveApiUrl": "https://aave-api-v2.aave.com",
-  "morphoApiUrl": "https://api.morpho.org",
+  "morphoApiUrl": "https://blue-api.morpho.org",
   "compoundApiUrl": "https://api.compound.finance",
   "plaidApiUrl": "https://sandbox.plaid.com",
   "plaidSecretKey": "plaid_credentials",

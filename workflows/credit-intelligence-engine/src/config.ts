@@ -26,8 +26,14 @@ export const configSchema = z.object({
   // On-chain: contract that mints/verifies attestations
   attestationContractAddress: evmAddress,
 
-  // CRE chain selector (e.g. "ethereum-testnet-sepolia")
+  // On-chain: GuardianVault that dispatches CCIP guardian actions
+  guardianVaultAddress: evmAddress,
+
+  // CRE chain selector for the source chain (e.g. "ethereum-testnet-sepolia")
   chainSelectorName: nonEmptyString,
+
+  // CCIP destination chain for guardian rebalancing (e.g. "ethereum-testnet-sepolia-base-1")
+  ccipDestinationChain: nonEmptyString,
 
   // ── DeFi Protocol API endpoints ───────────────────────────
   // Queried via ConfidentialHTTPClient inside the TEE.

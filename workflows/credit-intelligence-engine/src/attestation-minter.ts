@@ -1,23 +1,3 @@
-// ============================================================
-// ConfidentialGuard Protocol — Attestation Minter
-// workflows/credit-intelligence-engine/src/attestation-minter.ts
-//
-// Writes a single on-chain attestation by calling
-// mintAttestation(address subject, uint8 tier) on
-// ConfidentialGuardAttestation.sol via the CRE report pipeline.
-//
-// FLOW
-//   1. ABI-encode mintAttestation(subject, tier) calldata
-//   2. runtime.report() — TEE signs the calldata, producing a
-//      Report with threshold signatures from the DON quorum
-//   3. EVMClient.writeReport() — submits the signed report to
-//      the ConfidentialGuardAttestation contract on Sepolia
-//
-// PRIVACY
-//   Only `tier` (uint8 1–5) appears on-chain. The full
-//   CreditScoreDetails (UHF, contagion, DSS) is computed
-//   inside the TEE and discarded after minting.
-// ============================================================
 
 import {
   EVMClient,
@@ -28,10 +8,6 @@ import type { Runtime } from '@chainlink/cre-sdk'
 import { encodeFunctionData, type Address, type Hex } from 'viem'
 import type { CreditTier } from '@confidential-guard/risk-engine'
 import type { WorkflowConfig } from './config'
-
-// ── ABI Fragment ──────────────────────────────────────────────
-// Only the function we call — no need for the full ABI.
-// Matches ConfidentialGuardAttestation.sol exactly.
 
 const MINT_ATTESTATION_ABI = [
   {
