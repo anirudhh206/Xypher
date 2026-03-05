@@ -629,5 +629,37 @@ describe('ConfidentialGuardAttestation', function () {
         expect(await attestation.nextMintAllowedAt(subject1.address)).to.equal(expected)
       })
     })
+
+    // ── isExpiringSoon ────────────────────────────────────────────
+
+    describe('isExpiringSoon', () => {
+      beforeEach(async () => {
+        await attestation.connect(subject1).grantPermission()
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      })
+
+      it('returns false for subject with no attestation', async () => {
+        expect(await attestation.isExpiringSoon(subject2.address, 3600n)).to.be.false
+      })
+
+      it('returns false when expiry is far away', async () => {
+        // Just minted — 24h until expiry, window=1h → not expiring soon
+        expect(await attestation.isExpiringSoon(subject1.address, 3600n)).to.be.false
+      })
+
+      it('returns true when within the window', async () => {
+        // Advance to 23h30m — only 30 min left, window=1h → expiring soon
+        await ethers.provider.send('evm_increaseTime', [84_600])
+        await ethers.provider.send('evm_mine', [])
+        expect(await attestation.isExpiringSoon(subject1.address, 3600n)).to.be.true
+      })
+
+      it('returns false when already expired', async () => {
+        // Advance past 24h — already expired, not "expiring soon"
+        await ethers.provider.send('evm_increaseTime', [86_401])
+        await ethers.provider.send('evm_mine', [])
+        expect(await attestation.isExpiringSoon(subject1.address, 3600n)).to.be.false
+      })
+    })
   })
 })

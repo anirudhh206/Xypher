@@ -41,12 +41,24 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
 
   // ── Events ───────────────────────────────────────────────────────────────
 
-  /// @notice Emitted when a guardian action message is received and executed.
+  /// @notice Emitted when a guardian action message is received (pending execution).
   event GuardianActionReceived(
     bytes32 indexed messageId,
     uint64  indexed sourceChain,
     address indexed user,
     uint256         healthFactor
+  );
+
+  /// @notice Emitted when a pending guardian action is marked as executed.
+  event GuardianActionExecuted(
+    bytes32 indexed messageId,
+    address indexed user
+  );
+
+  /// @notice Emitted when an executor is added or removed.
+  event ExecutorUpdated(
+    address indexed executor,
+    bool            allowed
   );
 
   /// @notice Emitted when a source chain is added or removed.
@@ -70,6 +82,15 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
   /// @notice An address(0) was passed where a valid address is required.
   error ZeroAddress();
 
+  /// @notice CCIP message has already been processed (defense-in-depth).
+  error MessageAlreadyProcessed(bytes32 messageId);
+
+  /// @notice Guardian action does not exist or was already executed.
+  error ActionNotPending(bytes32 messageId);
+
+  /// @notice Caller is not the owner or an authorized executor.
+  error NotAuthorized(address caller);
+
   // ── Immutables ───────────────────────────────────────────────────────────
 
   /// @notice The CCIP router address on this (destination) chain.
@@ -86,6 +107,9 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
 
   /// @notice Guardian action history: messageId → GuardianAction.
   mapping(bytes32 messageId => GuardianAction action) public guardianActions;
+
+  /// @notice Addresses authorized to call executeAction (e.g., Chainlink Automation).
+  mapping(address executor => bool allowed) public authorizedExecutors;
 
   // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -107,6 +131,14 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
     _;
   }
 
+  /// @dev Reverts if msg.sender is neither the owner nor an authorized executor.
+  modifier onlyExecutor() {
+    if (msg.sender != owner() && !authorizedExecutors[msg.sender]) {
+      revert NotAuthorized(msg.sender);
+    }
+    _;
+  }
+
   // ── Admin ────────────────────────────────────────────────────────────────
 
   /**
@@ -122,9 +154,23 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
     bool    allowed,
     address sender
   ) external onlyOwner {
+    if (allowed && sender == address(0)) revert ZeroAddress();
+    address effectiveSender = allowed ? sender : address(0);
     allowedSourceChains[chainSelector] = allowed;
-    allowedSenders[chainSelector]      = allowed ? sender : address(0);
-    emit SourceChainUpdated(chainSelector, allowed, sender);
+    allowedSenders[chainSelector]      = effectiveSender;
+    emit SourceChainUpdated(chainSelector, allowed, effectiveSender);
+  }
+
+  /**
+   * @notice Adds or removes an authorized executor (e.g., Chainlink Automation upkeep).
+   * @dev Only owner. Executors can call executeAction after rebalancing completes.
+   * @param executor Address to authorize or revoke.
+   * @param allowed  True to authorize, false to revoke.
+   */
+  function setExecutor(address executor, bool allowed) external onlyOwner {
+    if (executor == address(0)) revert ZeroAddress();
+    authorizedExecutors[executor] = allowed;
+    emit ExecutorUpdated(executor, allowed);
   }
 
   // ── CCIP receive ─────────────────────────────────────────────────────────
@@ -149,6 +195,11 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
   function ccipReceive(
     Client.Any2EVMMessage calldata message
   ) external override onlyRouter {
+    // ── Defense-in-depth: reject duplicate messages ─────────────────────────
+    if (guardianActions[message.messageId].receivedAt != 0) {
+      revert MessageAlreadyProcessed(message.messageId);
+    }
+
     // ── Validate source chain ──────────────────────────────────────────────
     uint64 sourceChain = message.sourceChainSelector;
     if (!allowedSourceChains[sourceChain]) {
@@ -167,13 +218,14 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
       (address, uint256)
     );
 
-    // ── Record action ─────────────────────────────────────────────────────
+    // ── Record action as pending ──────────────────────────────────────────
+    // executed = false until executeAction() is called after actual rebalancing.
     guardianActions[message.messageId] = GuardianAction({
       user:         user,
       healthFactor: healthFactor,
       sourceChain:  sourceChain,
       receivedAt:   uint64(block.timestamp),
-      executed:     true
+      executed:     false
     });
 
     emit GuardianActionReceived(
@@ -182,6 +234,21 @@ contract CCIPGuardianReceiver is IAny2EVMMessageReceiver, Ownable {
       user,
       healthFactor
     );
+  }
+
+  /**
+   * @notice Marks a pending guardian action as executed after rebalancing.
+   * @dev Only owner or automation. Called after the actual rebalancing
+   *      action (e.g., supply more collateral) has been completed.
+   * @param messageId The CCIP message ID of the action to mark executed.
+   */
+  function executeAction(bytes32 messageId) external onlyExecutor {
+    GuardianAction storage action = guardianActions[messageId];
+    if (action.receivedAt == 0 || action.executed) {
+      revert ActionNotPending(messageId);
+    }
+    action.executed = true;
+    emit GuardianActionExecuted(messageId, action.user);
   }
 
   // ── View functions ────────────────────────────────────────────────────────

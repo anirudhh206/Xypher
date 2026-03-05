@@ -8,7 +8,7 @@
 //   1. Only CCIP router can call ccipReceive
 //   2. Only allowed source chains are processed
 //   3. Only registered sender on source chain is accepted
-//   4. GuardianAction is stored correctly with executed=true
+//   4. GuardianAction is stored with executed=false (pending until executeAction)
 //   5. GuardianActionReceived event emitted with correct args
 //   6. setSourceChain: only owner, emits SourceChainUpdated
 // ============================================================
@@ -110,6 +110,19 @@ describe('CCIPGuardianReceiver', function () {
         receiver.connect(attacker).setSourceChain(SEPOLIA_SELECTOR, true, vault.address)
       ).to.be.revertedWithCustomError(receiver, 'OwnableUnauthorizedAccount')
     })
+
+    it('reverts when allowed=true and sender=address(0)', async () => {
+      await expect(
+        receiver.connect(owner).setSourceChain(SEPOLIA_SELECTOR, true, ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(receiver, 'ZeroAddress')
+    })
+
+    it('emits effectiveSender=address(0) when disabling', async () => {
+      await expect(
+        receiver.connect(owner).setSourceChain(SEPOLIA_SELECTOR, false, vault.address)
+      ).to.emit(receiver, 'SourceChainUpdated')
+        .withArgs(SEPOLIA_SELECTOR, false, ethers.ZeroAddress)
+    })
   })
 
   // ─────────────────────────────────────────────────────────────
@@ -136,7 +149,7 @@ describe('CCIPGuardianReceiver', function () {
       expect(action.user).to.equal(user1.address)
       expect(action.healthFactor).to.equal(TEST_HF)
       expect(action.sourceChain).to.equal(SEPOLIA_SELECTOR)
-      expect(action.executed).to.be.true
+      expect(action.executed).to.be.false
     })
 
     it('emits GuardianActionReceived with correct args', async () => {
@@ -181,6 +194,25 @@ describe('CCIPGuardianReceiver', function () {
         .withArgs(attacker.address)
     })
 
+    it('reverts on duplicate message (replay guard)', async () => {
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      // Second delivery of same message should revert
+      await expect(
+        router.deliver(
+          await receiver.getAddress(),
+          SEPOLIA_SELECTOR,
+          vault.address,
+          messageData()
+        )
+      ).to.be.revertedWithCustomError(receiver, 'MessageAlreadyProcessed')
+    })
+
     it('reverts when called directly (not via router)', async () => {
       // ccipReceive is protected by onlyRouter — only i_ccipRouter can call it.
       // Attacker calling directly gets InvalidRouter revert.
@@ -194,6 +226,135 @@ describe('CCIPGuardianReceiver', function () {
         })
       ).to.be.revertedWithCustomError(receiver, 'InvalidRouter')
         .withArgs(attacker.address)
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────
+  // executeAction
+  // ─────────────────────────────────────────────────────────────
+
+  describe('executeAction', () => {
+    const messageData = () => ethers.AbiCoder.defaultAbiCoder().encode(
+      ['address', 'uint256'],
+      [user1.address, TEST_HF]
+    )
+
+    it('marks a pending action as executed', async () => {
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      const messageId = await router.lastMessageId()
+      expect((await receiver.getGuardianAction(messageId)).executed).to.be.false
+
+      await receiver.connect(owner).executeAction(messageId)
+      expect((await receiver.getGuardianAction(messageId)).executed).to.be.true
+    })
+
+    it('emits GuardianActionExecuted', async () => {
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      const messageId = await router.lastMessageId()
+      await expect(
+        receiver.connect(owner).executeAction(messageId)
+      ).to.emit(receiver, 'GuardianActionExecuted')
+        .withArgs(messageId, user1.address)
+    })
+
+    it('reverts when action does not exist', async () => {
+      await expect(
+        receiver.connect(owner).executeAction(ethers.ZeroHash)
+      ).to.be.revertedWithCustomError(receiver, 'ActionNotPending')
+    })
+
+    it('reverts when action already executed', async () => {
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      const messageId = await router.lastMessageId()
+      await receiver.connect(owner).executeAction(messageId)
+
+      await expect(
+        receiver.connect(owner).executeAction(messageId)
+      ).to.be.revertedWithCustomError(receiver, 'ActionNotPending')
+    })
+
+    it('reverts for unauthorized caller', async () => {
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      const messageId = await router.lastMessageId()
+      await expect(
+        receiver.connect(attacker).executeAction(messageId)
+      ).to.be.revertedWithCustomError(receiver, 'NotAuthorized')
+        .withArgs(attacker.address)
+    })
+
+    it('allows authorized executor to execute', async () => {
+      await receiver.connect(owner).setExecutor(user1.address, true)
+
+      await router.deliver(
+        await receiver.getAddress(),
+        SEPOLIA_SELECTOR,
+        vault.address,
+        messageData()
+      )
+
+      const messageId = await router.lastMessageId()
+      await receiver.connect(user1).executeAction(messageId)
+      expect((await receiver.getGuardianAction(messageId)).executed).to.be.true
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────
+  // setExecutor
+  // ─────────────────────────────────────────────────────────────
+
+  describe('setExecutor', () => {
+    it('adds an executor', async () => {
+      await receiver.connect(owner).setExecutor(user1.address, true)
+      expect(await receiver.authorizedExecutors(user1.address)).to.be.true
+    })
+
+    it('removes an executor', async () => {
+      await receiver.connect(owner).setExecutor(user1.address, true)
+      await receiver.connect(owner).setExecutor(user1.address, false)
+      expect(await receiver.authorizedExecutors(user1.address)).to.be.false
+    })
+
+    it('emits ExecutorUpdated', async () => {
+      await expect(
+        receiver.connect(owner).setExecutor(user1.address, true)
+      ).to.emit(receiver, 'ExecutorUpdated')
+        .withArgs(user1.address, true)
+    })
+
+    it('reverts for non-owner', async () => {
+      await expect(
+        receiver.connect(attacker).setExecutor(user1.address, true)
+      ).to.be.revertedWithCustomError(receiver, 'OwnableUnauthorizedAccount')
+    })
+
+    it('reverts when executor is address(0)', async () => {
+      await expect(
+        receiver.connect(owner).setExecutor(ethers.ZeroAddress, true)
+      ).to.be.revertedWithCustomError(receiver, 'ZeroAddress')
     })
   })
 

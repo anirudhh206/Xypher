@@ -11,6 +11,7 @@
 // ============================================================
 
 import { z } from 'zod'
+import { EVMClient } from '@chainlink/cre-sdk'
 
 // ── Validators ────────────────────────────────────────────────
 
@@ -19,6 +20,15 @@ const evmAddress = z
   .regex(/^0x[0-9a-fA-F]{40}$/, 'Must be a 0x-prefixed 40-character hex address')
 
 const nonEmptyString = z.string().min(1)
+
+// Derive valid chain names from the SDK so this stays in sync automatically.
+const SUPPORTED_CHAINS = Object.keys(
+  EVMClient.SUPPORTED_CHAIN_SELECTORS,
+) as [ChainName, ...ChainName[]]
+
+type ChainName = keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
+
+const chainSelectorEnum = z.enum(SUPPORTED_CHAINS)
 
 // ── Config Schema ─────────────────────────────────────────────
 
@@ -30,10 +40,10 @@ export const configSchema = z.object({
   guardianVaultAddress: evmAddress,
 
   // CRE chain selector for the source chain (e.g. "ethereum-testnet-sepolia")
-  chainSelectorName: nonEmptyString,
+  chainSelectorName: chainSelectorEnum,
 
   // CCIP destination chain for guardian rebalancing (e.g. "ethereum-testnet-sepolia-base-1")
-  ccipDestinationChain: nonEmptyString,
+  ccipDestinationChain: chainSelectorEnum,
 
   // ── DeFi Protocol API endpoints ───────────────────────────
   // Queried via ConfidentialHTTPClient inside the TEE.

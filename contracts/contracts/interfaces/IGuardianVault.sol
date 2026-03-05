@@ -69,6 +69,9 @@ interface IGuardianVault {
   /// @notice Emitted when a trusted lender is added or removed.
   event TrustedLenderUpdated(address indexed lender, bool trusted);
 
+  /// @notice Emitted when an authorized keeper is added or removed.
+  event KeeperUpdated(address indexed keeper, bool allowed);
+
   // ─────────────────────────────────────────────────────────────────────
   // Errors
   // ─────────────────────────────────────────────────────────────────────

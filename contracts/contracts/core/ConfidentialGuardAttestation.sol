@@ -170,7 +170,9 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable {
   ) external view override returns (bool) {
     uint64 exp = _attestations[subject].expiry;
     if (exp == 0) return false;   // never minted
-    return uint64(block.timestamp) + window >= exp;
+    uint64 ts = uint64(block.timestamp);
+    if (ts >= exp) return false;  // already expired — not "soon", it's gone
+    return ts + window >= exp;
   }
 
   function nextMintAllowedAt(address subject) external view returns (uint64) {

@@ -83,6 +83,9 @@ describe('GuardianVault', function () {
     // Register keeper as trusted lender — required for setDebtAmount
     await vault.connect(owner).setTrustedLender(keeper.address, true)
 
+    // Register keeper as authorized keeper for triggerGuardianAction
+    await vault.connect(owner).setKeeper(keeper.address, true)
+
     // Pre-fund guardian pool so triggerGuardianAction doesn't need msg.value
     await vault.connect(owner).fundGuardianPool({ value: POOL_FUND })
   })
@@ -153,6 +156,7 @@ describe('GuardianVault', function () {
       await emptyVault.waitForDeployment()
       await emptyVault.connect(owner).setDestinationChain(BASE_SEPOLIA_SELECTOR, true, receiver.address)
       await emptyVault.connect(owner).setTrustedLender(keeper.address, true)
+      await emptyVault.connect(owner).setKeeper(keeper.address, true)
 
       // Set up at-risk position
       await emptyVault.connect(user1).depositCollateral(
@@ -478,6 +482,18 @@ describe('GuardianVault', function () {
       ).to.be.revertedWithCustomError(vault, 'GuardianCooldownActive')
     })
 
+    it('reverts for unauthorized caller (not keeper or owner)', async () => {
+      await expect(
+        vault.connect(user2).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      ).to.be.revertedWithCustomError(vault, 'UnauthorizedCaller')
+    })
+
+    it('allows owner to trigger without being a keeper', async () => {
+      await expect(
+        vault.connect(owner).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
+      ).to.not.be.reverted
+    })
+
     it('allows re-trigger after cooldown elapses', async () => {
       await vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
 
@@ -488,6 +504,41 @@ describe('GuardianVault', function () {
       await expect(
         vault.connect(keeper).triggerGuardianAction(user1.address, BASE_SEPOLIA_SELECTOR)
       ).to.not.be.reverted
+    })
+  })
+
+  // ─────────────────────────────────────────────────────────────
+  // setKeeper (admin)
+  // ─────────────────────────────────────────────────────────────
+
+  describe('setKeeper', () => {
+    it('adds an authorized keeper', async () => {
+      await vault.connect(owner).setKeeper(user2.address, true)
+      expect(await vault.authorizedKeepers(user2.address)).to.be.true
+    })
+
+    it('removes an authorized keeper', async () => {
+      await vault.connect(owner).setKeeper(user2.address, true)
+      await vault.connect(owner).setKeeper(user2.address, false)
+      expect(await vault.authorizedKeepers(user2.address)).to.be.false
+    })
+
+    it('emits KeeperUpdated', async () => {
+      await expect(vault.connect(owner).setKeeper(user2.address, true))
+        .to.emit(vault, 'KeeperUpdated')
+        .withArgs(user2.address, true)
+    })
+
+    it('reverts for non-owner', async () => {
+      await expect(
+        vault.connect(user1).setKeeper(user2.address, true)
+      ).to.be.revertedWithCustomError(vault, 'OwnableUnauthorizedAccount')
+    })
+
+    it('reverts when keeper is address(0)', async () => {
+      await expect(
+        vault.connect(owner).setKeeper(ethers.ZeroAddress, true)
+      ).to.be.revertedWithCustomError(vault, 'UnauthorizedCaller')
     })
   })
 

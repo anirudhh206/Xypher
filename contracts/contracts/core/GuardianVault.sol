@@ -28,6 +28,9 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
   mapping(address lender => bool trusted) public trustedLenders;
   mapping(uint64 chainSelector => bool allowed) public allowedDestinationChains;
   mapping(uint64 chainSelector => address receiver) public destinationReceivers;
+  /// @notice Addresses authorized to call triggerGuardianAction (e.g., Chainlink Automation).
+  mapping(address keeper => bool allowed) public authorizedKeepers;
+
   /// @notice ETH balance reserved for CCIP fees. Funded via fundGuardianPool().
   uint256 public guardianPool;
 
@@ -46,6 +49,14 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
     _;
   }
 
+  /// @dev Reverts if msg.sender is neither the owner nor an authorized keeper.
+  modifier onlyKeeper() {
+    if (msg.sender != owner() && !authorizedKeepers[msg.sender]) {
+      revert UnauthorizedCaller();
+    }
+    _;
+  }
+
   function setDestinationChain(
     uint64  chainSelector,
     bool    allowed,
@@ -60,6 +71,18 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
   function setTrustedLender(address lender, bool trusted) external onlyOwner {
     trustedLenders[lender] = trusted;
     emit TrustedLenderUpdated(lender, trusted);
+  }
+
+  /**
+   * @notice Adds or removes an authorized keeper (e.g., Chainlink Automation upkeep).
+   * @dev Only owner. Keepers can call triggerGuardianAction to dispatch CCIP messages.
+   * @param keeper  Address to authorize or revoke.
+   * @param allowed True to authorize, false to revoke.
+   */
+  function setKeeper(address keeper, bool allowed) external onlyOwner {
+    if (keeper == address(0)) revert UnauthorizedCaller();
+    authorizedKeepers[keeper] = allowed;
+    emit KeeperUpdated(keeper, allowed);
   }
 
   /**
@@ -134,7 +157,7 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
   function triggerGuardianAction(
     address user,
     uint64  destinationChain
-  ) external override nonReentrant {
+  ) external override nonReentrant onlyKeeper {
     if (!allowedDestinationChains[destinationChain]) {
       revert InvalidChainSelector(destinationChain);
     }

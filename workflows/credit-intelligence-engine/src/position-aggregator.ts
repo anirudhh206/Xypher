@@ -10,14 +10,9 @@
 // Returns:
 //   positions  — normalized PositionData[] (empty if no active positions)
 //   plaidData  — PlaidData | null (null if unavailable or error)
-//   priceHints — token address → raw USD string from API metadata
-//                (used to prime buildPriceMap; Data Feeds override in prod)
 //
-// FAILURE SEMANTICS
-//   Individual protocol failures are non-fatal — the engine
-//   continues with whatever positions it could collect.
-//   An empty positions[] with null plaidData aborts minting
-//   (checked in risk-engine-workflow.ts).
+// PRIVACY: No raw wallet addresses or dollar amounts are logged.
+// Only keccak256 prefix tags and aggregate counts appear in logs.
 // ============================================================
 
 import {
@@ -35,15 +30,19 @@ import {
   type PlaidData,
   ADAPTER_ERROR_CODES,
 } from '@confidential-guard/risk-engine'
+import { keccak256, toBytes } from 'viem'
 import type { WorkflowConfig } from './config'
+
+// ── Privacy helper ────────────────────────────────────────────
+// Never log raw wallet addresses from a TEE workflow.
+// 5-byte keccak256 prefix gives traceability without exposure.
+const tag = (addr: string): string => keccak256(toBytes(addr)).slice(0, 12)
 
 // ── Internal Types ────────────────────────────────────────────
 
 export interface AggregatedPositions {
   readonly positions: readonly PositionData[]
   readonly plaidData: PlaidData | null
-  /** Raw price strings keyed by token address (lowercase). Optional hint for buildPriceMap. */
-  readonly priceHints: Readonly<Record<string, string>>
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -51,11 +50,16 @@ export interface AggregatedPositions {
 /**
  * Sends a confidential GET request inside the TEE and parses the JSON body.
  * Returns null on non-2xx status or any parse error — never throws.
+ *
+ * Note: relies on ConfidentialHTTPClient default timeout.
+ * If undefined, a hanging upstream could stall the entire scan.
  */
 function confGet(
   confHttp: ConfidentialHTTPClient,
   runtime: Runtime<WorkflowConfig>,
   url: string,
+  protocolName: string,
+  subjectTag: string,
 ): unknown | null {
   try {
     const response = confHttp
@@ -67,7 +71,7 @@ function confGet(
 
     if (!isHttpOk(response)) {
       runtime.log(
-        `[PositionAggregator] Non-2xx (${response.statusCode}) from ${url}`,
+        `[PositionAggregator] Non-2xx (${response.statusCode}) from ${protocolName} for ${subjectTag}…`,
       )
       return null
     }
@@ -75,7 +79,7 @@ function confGet(
     return json(response)
   } catch (err: unknown) {
     runtime.log(
-      `[PositionAggregator] HTTP error fetching ${url}: ${String(err)}`,
+      `[PositionAggregator] HTTP error fetching ${protocolName} for ${subjectTag}…: ${String(err)}`,
     )
     return null
   }
@@ -85,6 +89,8 @@ function confGet(
  * Sends a confidential POST request inside the TEE with a JSON body.
  * Injects Plaid credentials from Vault DON.
  * Returns null on failure — never throws.
+ *
+ * Note: relies on ConfidentialHTTPClient default timeout.
  */
 function confPost(
   confHttp: ConfidentialHTTPClient,
@@ -108,7 +114,7 @@ function confPost(
 
     if (!isHttpOk(response)) {
       runtime.log(
-        `[PositionAggregator] Non-2xx (${response.statusCode}) from Plaid: ${url}`,
+        `[PositionAggregator] Non-2xx (${response.statusCode}) from Plaid`,
       )
       return null
     }
@@ -128,11 +134,12 @@ function fetchAavePositions(
   confHttp: ConfidentialHTTPClient,
   runtime: Runtime<WorkflowConfig>,
   subject: string,
+  subjectTag: string,
 ): PositionData[] {
   const url = `${runtime.config.aaveApiUrl}/v1/users/${subject}`
-  runtime.log(`[PositionAggregator] Fetching Aave: ${url}`)
+  runtime.log(`[PositionAggregator] Fetching Aave for ${subjectTag}…`)
 
-  const raw = confGet(confHttp, runtime, url)
+  const raw = confGet(confHttp, runtime, url, 'Aave', subjectTag)
   if (raw === null) return []
 
   const result = AaveAdapter.normalize(raw, {
@@ -155,13 +162,14 @@ function fetchMorphoPositions(
   confHttp: ConfidentialHTTPClient,
   runtime: Runtime<WorkflowConfig>,
   subject: string,
+  subjectTag: string,
 ): PositionData[] {
   // Morpho Blue uses a REST endpoint; GraphQL variant is also supported
   // by the adapter but the REST endpoint is simpler for ConfidentialHTTP.
   const url = `${runtime.config.morphoApiUrl}/v1/users/${subject}/positions`
-  runtime.log(`[PositionAggregator] Fetching Morpho: ${url}`)
+  runtime.log(`[PositionAggregator] Fetching Morpho for ${subjectTag}…`)
 
-  const raw = confGet(confHttp, runtime, url)
+  const raw = confGet(confHttp, runtime, url, 'Morpho', subjectTag)
   if (raw === null) return []
 
   const result = MorphoAdapter.normalize(raw, {
@@ -183,11 +191,12 @@ function fetchCompoundPositions(
   confHttp: ConfidentialHTTPClient,
   runtime: Runtime<WorkflowConfig>,
   subject: string,
+  subjectTag: string,
 ): PositionData[] {
   const url = `${runtime.config.compoundApiUrl}/v1/accounts/${subject}`
-  runtime.log(`[PositionAggregator] Fetching Compound: ${url}`)
+  runtime.log(`[PositionAggregator] Fetching Compound for ${subjectTag}…`)
 
-  const raw = confGet(confHttp, runtime, url)
+  const raw = confGet(confHttp, runtime, url, 'Compound', subjectTag)
   if (raw === null) return []
 
   const result = CompoundAdapter.normalize(raw, {
@@ -238,9 +247,9 @@ function fetchPlaidData(
     return null
   }
 
+  // Privacy: log only account count — never dollar amounts
   runtime.log(
-    `[PositionAggregator] Plaid: ${result.data.accounts.length} account(s), ` +
-    `$${result.data.totalLiquidAssetsUSD.toFixed(2)} liquid`,
+    `[PositionAggregator] Plaid: ${result.data.accounts.length} account(s) aggregated`,
   )
   return result.data
 }
@@ -253,18 +262,23 @@ function fetchPlaidData(
  * Runs entirely inside the TEE. Protocol failures are non-fatal.
  * The caller is responsible for checking whether the result is
  * actionable (positions.length > 0 or plaidData !== null).
+ *
+ * Note: CRE TEE runtime executes these fetches sequentially.
+ * If ConfidentialHTTPClient gains concurrent request support,
+ * these can be parallelised for ~4x throughput improvement.
  */
 export function aggregatePositions(
   runtime: Runtime<WorkflowConfig>,
   subject: string,
 ): AggregatedPositions {
-  runtime.log(`[PositionAggregator] Starting aggregation for ${subject}`)
+  const subjectTag = tag(subject)
+  runtime.log(`[PositionAggregator] Starting aggregation for ${subjectTag}…`)
 
   const confHttp = new ConfidentialHTTPClient()
 
-  const aavePositions = fetchAavePositions(confHttp, runtime, subject)
-  const morphoPositions = fetchMorphoPositions(confHttp, runtime, subject)
-  const compoundPositions = fetchCompoundPositions(confHttp, runtime, subject)
+  const aavePositions = fetchAavePositions(confHttp, runtime, subject, subjectTag)
+  const morphoPositions = fetchMorphoPositions(confHttp, runtime, subject, subjectTag)
+  const compoundPositions = fetchCompoundPositions(confHttp, runtime, subject, subjectTag)
   const plaidData = fetchPlaidData(confHttp, runtime)
 
   const positions: PositionData[] = [
@@ -281,6 +295,5 @@ export function aggregatePositions(
   return {
     positions,
     plaidData,
-    priceHints: {},
   }
 }

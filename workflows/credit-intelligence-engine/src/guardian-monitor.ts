@@ -1,5 +1,6 @@
 import {
   EVMClient,
+  TxStatus,
   CronCapability,
   encodeCallMsg,
   hexToBase64,
@@ -13,6 +14,7 @@ import type { CronPayload, Runtime } from '@chainlink/cre-sdk'
 import {
   keccak256,
   stringToBytes,
+  toBytes,
   type Address,
   encodeFunctionData,
   decodeAbiParameters,
@@ -26,8 +28,10 @@ import type { WorkflowConfig } from './config'
 import { aggregatePositions } from './position-aggregator'
 import { mintAttestation } from './attestation-minter'
 
-const SEPOLIA_CHAIN_SELECTOR =
-  EVMClient.SUPPORTED_CHAIN_SELECTORS['ethereum-testnet-sepolia']
+// ── Privacy helper ────────────────────────────────────────────
+// Never log raw wallet addresses from a TEE workflow.
+// 5-byte keccak256 prefix gives traceability without exposure.
+const tag = (addr: Address): string => keccak256(toBytes(addr)).slice(0, 12)
 
 // Guardian intervenes when HF drops below this floor
 const GUARDIAN_HF_FLOOR = 1.3
@@ -134,7 +138,10 @@ function discoverActiveSubjects(
       }
     }
 
-    // Deduplicate
+    // Deduplicate. Note: revoked subjects will still appear here since
+    // AttestationMinted events are never deleted. isAttestationActive()
+    // filters them per-subject below. At scale, maintain an off-chain
+    // index rather than scanning all mint events.
     return [...new Set(subjects)]
   } catch (err: unknown) {
     runtime.log(`[GuardianMonitor] filterLogs error: ${String(err)}`)
@@ -238,25 +245,25 @@ function triggerCCIPRebalance(
   runtime: Runtime<WorkflowConfig>,
   evmClient: EVMClient,
   subject: Address,
-): void {
+): boolean {
   const vaultAddress = runtime.config.guardianVaultAddress as Address
   const destChainName = runtime.config.ccipDestinationChain
 
   // Resolve destination chain selector bigint from config string
+  type ChainName = keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
   const destChainSelector =
-    EVMClient.SUPPORTED_CHAIN_SELECTORS[
-      destChainName as keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
-    ]
+    EVMClient.SUPPORTED_CHAIN_SELECTORS[destChainName as ChainName]
 
   if (destChainSelector === undefined) {
-    runtime.log(
-      `[GuardianMonitor] Unknown ccipDestinationChain: "${destChainName}" — cannot trigger CCIP`,
+    throw new Error(
+      `[GuardianMonitor] Unknown ccipDestinationChain: "${destChainName}"`,
     )
-    return
   }
 
+  const subjectTag = tag(subject)
+
   runtime.log(
-    `[GuardianMonitor] Triggering CCIP rebalance for ${subject} ` +
+    `[GuardianMonitor] Triggering CCIP rebalance for ${subjectTag}… ` +
     `→ chain ${destChainName} (selector: ${destChainSelector})`,
   )
 
@@ -267,19 +274,28 @@ function triggerCCIPRebalance(
     args: [subject, destChainSelector],
   })
 
-  // TEE signs the calldata, DON submits to GuardianVault on Sepolia
+  // TEE signs the calldata, DON submits to GuardianVault on source chain
   const report = runtime.report(prepareReportRequest(calldata)).result()
 
-  evmClient
+  const writeResult = evmClient
     .writeReport(runtime, {
       receiver: hexToBase64(vaultAddress),
       report,
     })
     .result()
 
+  if (writeResult.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(
+      `[GuardianMonitor] CCIP rebalance not confirmed for ${subjectTag}… ` +
+      `— txStatus: ${TxStatus[writeResult.txStatus]}`,
+    )
+  }
+
   runtime.log(
-    `[GuardianMonitor] CCIP guardian action submitted for ${subject}`,
+    `[GuardianMonitor] CCIP guardian action confirmed for ${subjectTag}…`,
   )
+
+  return true
 }
 
 export function createGuardianMonitorTrigger(config: WorkflowConfig) {
@@ -294,7 +310,28 @@ export function guardianMonitorHandler(
   runtime.log('[GuardianMonitor] ═══ Guardian Scan Started ═══')
   runtime.log(`[GuardianMonitor] Time: ${runtime.now().toISOString()}`)
 
-  const evmClient = new EVMClient(SEPOLIA_CHAIN_SELECTOR)
+  // ── Invariant: HF_CRITICAL must be below GUARDIAN_HF_FLOOR ──
+  // If violated, every subject goes straight to CCIP rebalance
+  // and the attestation refresh branch never fires.
+  if (HF_CRITICAL >= GUARDIAN_HF_FLOOR) {
+    throw new Error(
+      `[GuardianMonitor] Config error: HF_CRITICAL (${HF_CRITICAL}) ` +
+      `must be < GUARDIAN_HF_FLOOR (${GUARDIAN_HF_FLOOR})`,
+    )
+  }
+
+  // ── Resolve chain selector from config ──────────────────────
+  type ChainName = keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
+  const chainSelectorName = runtime.config.chainSelectorName as ChainName
+  const chainSelector = EVMClient.SUPPORTED_CHAIN_SELECTORS[chainSelectorName]
+
+  if (!chainSelector) {
+    throw new Error(
+      `[GuardianMonitor] Unsupported chainSelectorName: ${chainSelectorName}`,
+    )
+  }
+
+  const evmClient = new EVMClient(chainSelector)
 
   const subjects = discoverActiveSubjects(evmClient, runtime)
   runtime.log(`[GuardianMonitor] Active subjects to scan: ${subjects.length}`)
@@ -304,23 +341,29 @@ export function guardianMonitorHandler(
     return JSON.stringify({ ok: true, scanned: 0, refreshed: 0, critical: 0 })
   }
 
+  // ── Fetch prices — abort if unavailable ─────────────────────
   const prices = fetchPrices(evmClient, runtime)
+  if (Object.keys(prices).length === 0) {
+    runtime.log('[GuardianMonitor] No prices available — aborting scan to prevent false triggers')
+    return JSON.stringify({ ok: false, reason: 'no_prices', scanned: 0, refreshed: 0, critical: 0 })
+  }
 
   let refreshed = 0
   let critical = 0
 
   for (const subject of subjects) {
-    runtime.log(`[GuardianMonitor] Checking subject: ${subject}`)
+    const subjectTag = tag(subject)
+    runtime.log(`[GuardianMonitor] Checking subject: ${subjectTag}…`)
 
     if (!isAttestationActive(evmClient, runtime, subject)) {
-      runtime.log(`[GuardianMonitor] ${subject}: no active attestation, skipping`)
+      runtime.log(`[GuardianMonitor] ${subjectTag}…: no active attestation, skipping`)
       continue
     }
 
     const { positions, plaidData } = aggregatePositions(runtime, subject)
 
     if (positions.length === 0) {
-      runtime.log(`[GuardianMonitor] ${subject}: no positions, skipping`)
+      runtime.log(`[GuardianMonitor] ${subjectTag}…: no positions, skipping`)
       continue
     }
 
@@ -328,40 +371,39 @@ export function guardianMonitorHandler(
     const { unifiedHealthFactor, tier } = scoreDetails.creditScore
 
     runtime.log(
-      `[GuardianMonitor] ${subject}: UHF=${unifiedHealthFactor.toFixed(4)} tier=${tier}`,
+      `[GuardianMonitor] ${subjectTag}…: UHF=${unifiedHealthFactor.toFixed(4)} tier=${tier}`,
     )
 
     if (unifiedHealthFactor < HF_CRITICAL) {
       runtime.log(
-        `[GuardianMonitor] CRITICAL: ${subject} HF=${unifiedHealthFactor.toFixed(4)} ` +
+        `[GuardianMonitor] CRITICAL: ${subjectTag}… HF=${unifiedHealthFactor.toFixed(4)} ` +
         `— dispatching CCIP rebalance to ${runtime.config.ccipDestinationChain}`,
       )
       try {
         triggerCCIPRebalance(runtime, evmClient, subject)
-        runtime.log(`[GuardianMonitor] CCIP rebalance dispatched for ${subject}`)
       } catch (err: unknown) {
         runtime.log(
-          `[GuardianMonitor] CCIP rebalance failed for ${subject}: ${String(err)}`,
+          `[GuardianMonitor] CCIP rebalance failed for ${subjectTag}…: ${String(err)}`,
         )
       }
       critical++
     } else if (unifiedHealthFactor < GUARDIAN_HF_FLOOR) {
        runtime.log(
-        `[GuardianMonitor] HF degraded for ${subject} ` +
+        `[GuardianMonitor] HF degraded for ${subjectTag}… ` +
         `(${unifiedHealthFactor.toFixed(4)} < ${GUARDIAN_HF_FLOOR}) — refreshing attestation`,
       )
 
       try {
         mintAttestation(runtime, subject, scoreDetails.creditScore.tier)
-        runtime.log(`[GuardianMonitor] ✓ Attestation refreshed for ${subject}`)
+        runtime.log(`[GuardianMonitor] Attestation refreshed for ${subjectTag}…`)
         refreshed++
       } catch (err: unknown) {
         runtime.log(
-          `[GuardianMonitor] Failed to refresh attestation for ${subject}: ${String(err)}`,
+          `[GuardianMonitor] Failed to refresh attestation for ${subjectTag}…: ${String(err)}`,
         )
       }
     } else {
-      runtime.log(`[GuardianMonitor] ${subject}: HF healthy, no action needed`)
+      runtime.log(`[GuardianMonitor] ${subjectTag}…: HF healthy, no action needed`)
     }
   }
 

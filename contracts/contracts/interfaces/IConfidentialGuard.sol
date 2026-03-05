@@ -85,20 +85,11 @@ interface IConfidentialGuard {
   /// @notice Subject has not called grantPermission() — cannot receive attestation.
   error SubjectNotPermitted(address subject);
 
-  /// @notice Attestation exists but has passed its expiry timestamp.
-  error AttestationExpired(address subject, uint64 expiry);
-
-  /// @notice Attestation exists but active flag is false (revoked).
-  error AttestationNotActive(address subject);
-
   /// @notice Address(0) was passed where a non-zero address is required.
   error ZeroAddress();
 
   /// @notice mintAttestation called before MIN_MINT_INTERVAL has elapsed since last mint.
   error MintTooFrequent(address subject, uint64 nextAllowedAt);
-
-  /// @notice Operation rejected because the contract is paused.
-  error ContractPaused();
 
   // ─────────────────────────────────────────────────────────────────────
   // Subject functions
