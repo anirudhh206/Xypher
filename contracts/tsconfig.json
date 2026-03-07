@@ -10,7 +10,7 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck":     true,
-    "types": ["node"]
+    "types": ["node", "hardhat"]
   },
   "include": ["hardhat.config.ts", "test/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "artifacts", "cache", "dist"]

@@ -19,14 +19,13 @@ async function setup() {
   const priceFeed = (await ethers.deployContract("MockPriceFeed", [
     ETH_PRICE,
     8,
+    "ETH / USD",
   ])) as MockPriceFeed;
 
   const attestation = (await ethers.deployContract(
     "ConfidentialGuardAttestation",
-    [owner.address]
+    [workflow.address, owner.address]
   )) as ConfidentialGuardAttestation;
-
-  await attestation.connect(owner).setWorkflowAddress(workflow.address);
 
   const lenderContract = (await ethers.deployContract("ConfidentialLender", [
     attestation.target,
@@ -35,8 +34,8 @@ async function setup() {
   ])) as ConfidentialLender;
 
   const mint = async (signer: HardhatEthersSigner, tier: number) => {
-    const expiry = Math.floor(Date.now() / 1000) + YEAR;
-    await attestation.connect(workflow).mintAttestation(signer.address, tier, expiry);
+    await attestation.connect(signer).grantPermission();
+    await attestation.connect(workflow).mintAttestation(signer.address, tier);
   };
 
   const seedPool = async (amount = ONE_ETH) => {
@@ -264,7 +263,7 @@ describe("ConfidentialLender", () => {
       await mint(b1, 1);
       await depositCollateral(b1);
       await lenderContract.connect(b1).borrow(ethers.parseEther("0.89"));
-      await priceFeed.updateAnswer(1_000 * 1e8);
+      await priceFeed.setPrice(1_000 * 1e8);
       return ctx;
     }
 
@@ -375,7 +374,7 @@ describe("ConfidentialLender", () => {
       await depositCollateral(b1);
       await lenderContract.connect(b1).borrow(ethers.parseEther("0.5"));
       const hfBefore = await lenderContract.getHealthFactor(b1.address);
-      await priceFeed.updateAnswer(ETH_PRICE / 2);
+      await priceFeed.setPrice(ETH_PRICE / 2);
       const hfAfter = await lenderContract.getHealthFactor(b1.address);
       expect(hfAfter).to.be.lt(hfBefore);
     });
