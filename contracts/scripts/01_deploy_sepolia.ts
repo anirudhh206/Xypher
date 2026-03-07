@@ -82,7 +82,7 @@ async function main(): Promise<void> {
   const [deployer] = await ethers.getSigners()
   const deployerAddress = await deployer.getAddress()
 
-  console.log('=== ConfidentialGuard Protocol — Sepolia Deployment ===')
+  console.log('=== Xypher Protocol — Sepolia Deployment ===')
   console.log()
   console.log(`Network:  ${network.name} (chainId: ${network.config.chainId})`)
   console.log(`Deployer: ${deployerAddress}`)
