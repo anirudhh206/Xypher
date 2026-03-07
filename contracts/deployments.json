@@ -1,11 +1,11 @@
 {
   "sepolia": {
-    "attestation": "0x021cBE5e32F61559A52262F0d281928C28760Df3",
-    "vault": "0x10c6e8c1A1a44289dd26d871233604dB18D5f97a",
+    "attestation": "0x213f4f61448c062cFBEC012Ce81008a8EFf35E05",
+    "vault": "0x607A1d43BAcE9Ef8C370102750eec33b1A97198C",
     "deployer": "0x683a17159E7888d40106C52C55B35a4B4b05eFbD",
-    "deployedAt": "2026-03-07T20:09:51.793Z",
-    "attestationBlock": 10404431,
-    "vaultBlock": 10404433
+    "deployedAt": "2026-03-07T20:14:03.340Z",
+    "attestationBlock": 10404450,
+    "vaultBlock": 10404452
   },
   "baseSepolia": {
     "receiver": null,

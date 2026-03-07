@@ -1,21 +1,3 @@
-// ============================================================
-// ConfidentialGuard Protocol — Sepolia Deployment Script
-// scripts/01_deploy_sepolia.ts
-//
-// Deploys to Ethereum Sepolia:
-//   1. ConfidentialGuardAttestation — ERC-style attestation registry
-//   2. GuardianVault — CCIP-enabled health factor guardian
-//
-// Run with:
-//   npx hardhat run scripts/01_deploy_sepolia.ts --network sepolia
-//
-// After this script:
-//   - Record ATTESTATION_ADDRESS and VAULT_ADDRESS
-//   - Run 02_deploy_base_sepolia.ts with VAULT_ADDRESS
-//   - Run 03_configure_sepolia.ts with RECEIVER_ADDRESS
-//   - Register the CRE workflow, then run 04_set_workflow.ts
-// ============================================================
-
 import hre from 'hardhat'
 import { writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
