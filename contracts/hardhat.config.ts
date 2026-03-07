@@ -22,8 +22,8 @@ const config: HardhatUserConfig = {
         enabled: true,
         runs:    200,   // Balanced: deploy cost vs call cost
       },
-      viaIR: false,     // Keep deterministic for audit trails
-      evmVersion: 'paris', // Broadly supported — no PUSH0 yet on all L2s
+      viaIR: true,     // Keep deterministic for audit trails
+      evmVersion: 'cancun', // Broadly supported — no PUSH0 yet on all L2s
     },
   },
 
