@@ -57,7 +57,7 @@ describe("CrossChainAttestationReceiver", () => {
       const { router } = await setup();
       const F = await ethers.getContractFactory("CrossChainAttestationReceiver");
       await expect(F.deploy(router.target, ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(F, "ZeroAddress");
+        .to.be.revertedWithCustomError(F, "OwnableInvalidOwner");
     });
   });
 

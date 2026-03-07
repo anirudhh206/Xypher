@@ -22,9 +22,9 @@ async function setup() {
   ])) as CreditIdentityNFT;
 
   const mint = async (signer: HardhatEthersSigner, tier: number) => {
-    const expiry = Math.floor(Date.now() / 1000) + YEAR;
     await attestation.connect(signer).grantPermission();
-    await attestation.connect(workflow).mintAttestation(signer.address, tier, expiry);
+    // Pass 0n so the contract derives expiry from block.timestamp + 24h (safe regardless of EVM time)
+    await attestation.connect(workflow).mintAttestation(signer.address, tier, 0n);
   };
 
   return { nft, attestation, owner, workflow, user1, user2, user3, rando, mint };
