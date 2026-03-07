@@ -19,8 +19,9 @@ async function setup() {
 
   const attestation = await ethers.deployContract(
     "ConfidentialGuardAttestation",
-    [workflow.address, owner.address]
+    [owner.address]
   );
+  await attestation.connect(owner).setWorkflowAddress(workflow.address);
 
   const lenderContract = await ethers.deployContract("ConfidentialLender", [
     attestation.target,
@@ -30,7 +31,7 @@ async function setup() {
 
   const mint = async (signer: HardhatEthersSigner, tier: number) => {
     await attestation.connect(signer).grantPermission();
-    await attestation.connect(workflow).mintAttestation(signer.address, tier);
+    await attestation.connect(workflow).mintAttestation(signer.address, tier, 0n);
   };
 
   const seedPool = async (amount = ONE_ETH) => {

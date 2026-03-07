@@ -134,7 +134,7 @@ interface IConfidentialGuard {
    * @param subject Wallet address being attested.
    * @param tier    Credit tier [1,5]. 1 = best, 5 = ineligible for new credit.
    */
-  function mintAttestation(address subject, uint8 tier) external;
+  function mintAttestation(address subject, uint8 tier, uint64 expiresAt) external;
 
   /**
    * @notice Updates the authorised CRE workflow address.

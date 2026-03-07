@@ -14,8 +14,9 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
   beforeEach(async function () {
     ;[owner, workflow, subject] = await ethers.getSigners()
     const factory = await ethers.getContractFactory('ConfidentialGuardAttestation')
-    attestation   = await factory.deploy(workflow.address, owner.address)
+    attestation   = await factory.deploy(owner.address)
     await attestation.waitForDeployment()
+    await attestation.connect(owner).setWorkflowAddress(workflow.address)
     await attestation.connect(subject).grantPermission()
   })
 
@@ -33,7 +34,7 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
         [subject.address, 31337]  // Hardhat default chainId
       )
 
-      await attestation.connect(workflow).mintAttestation(subject.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject.address, 2, 0n)
 
       // Inspect subjectHash via low-level storage or via a dedicated getter.
       // We verify indirectly: revert would have occurred if hash was wrong.
@@ -72,14 +73,14 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
 
   describe('computeExpiry', () => {
     it('expiry = block.timestamp + 86400 exactly', async () => {
-      const tx    = await attestation.connect(workflow).mintAttestation(subject.address, 2)
+      const tx    = await attestation.connect(workflow).mintAttestation(subject.address, 2, 0n)
       const block = await ethers.provider.getBlock(tx.blockNumber!)
       const view  = await attestation.getAttestation(subject.address)
       expect(view.expiry).to.equal(BigInt(block!.timestamp) + ONE_DAY)
     })
 
     it('timestamp stored matches block.timestamp', async () => {
-      const tx    = await attestation.connect(workflow).mintAttestation(subject.address, 2)
+      const tx    = await attestation.connect(workflow).mintAttestation(subject.address, 2, 0n)
       const block = await ethers.provider.getBlock(tx.blockNumber!)
       const view  = await attestation.getAttestation(subject.address)
       expect(view.timestamp).to.equal(BigInt(block!.timestamp))
@@ -94,7 +95,7 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
     for (const invalidTier of [0, 6, 255]) {
       it(`reverts for tier = ${invalidTier}`, async () => {
         await expect(
-          attestation.connect(workflow).mintAttestation(subject.address, invalidTier)
+          attestation.connect(workflow).mintAttestation(subject.address, invalidTier, 0n)
         ).to.be.revertedWithCustomError(attestation, 'InvalidTier')
       })
     }
@@ -102,7 +103,7 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
     for (const validTier of [1, 2, 3, 4, 5]) {
       it(`accepts tier = ${validTier}`, async () => {
         await expect(
-          attestation.connect(workflow).mintAttestation(subject.address, validTier)
+          attestation.connect(workflow).mintAttestation(subject.address, validTier, 0n)
         ).to.not.be.reverted
       })
     }
@@ -114,7 +115,7 @@ describe('AttestationLib (via ConfidentialGuardAttestation)', function () {
 
   describe('isValid', () => {
     beforeEach(async () => {
-      await attestation.connect(workflow).mintAttestation(subject.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject.address, 2, 0n)
     })
 
     it('returns true when active + not expired + tier ≤ minTier', async () => {

@@ -42,8 +42,9 @@ describe('ConfidentialGuardAttestation', function () {
     ;[owner, workflow, subject1, subject2, attacker] = await ethers.getSigners()
 
     const factory = await ethers.getContractFactory('ConfidentialGuardAttestation')
-    attestation = await factory.deploy(workflow.address, owner.address)
+    attestation = await factory.deploy(owner.address)
     await attestation.waitForDeployment()
+    await attestation.connect(owner).setWorkflowAddress(workflow.address)
   })
 
   // ─────────────────────────────────────────────────────────────
@@ -60,9 +61,8 @@ describe('ConfidentialGuardAttestation', function () {
     })
 
     it('reverts if workflowAddress is address(0)', async () => {
-      const factory = await ethers.getContractFactory('ConfidentialGuardAttestation')
       await expect(
-        factory.deploy(ethers.ZeroAddress, owner.address)
+        attestation.connect(owner).setWorkflowAddress(ethers.ZeroAddress)
       ).to.be.revertedWithCustomError(attestation, 'ZeroAddress')
     })
 
@@ -71,7 +71,7 @@ describe('ConfidentialGuardAttestation', function () {
       // reverts with OwnableInvalidOwner before our ZeroAddress check executes.
       const factory = await ethers.getContractFactory('ConfidentialGuardAttestation')
       await expect(
-        factory.deploy(workflow.address, ethers.ZeroAddress)
+        factory.deploy(ethers.ZeroAddress)
       ).to.be.revertedWithCustomError(attestation, 'OwnableInvalidOwner')
         .withArgs(ethers.ZeroAddress)
     })
@@ -130,7 +130,7 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('deactivates a live attestation on revoke', async () => {
       await attestation.connect(subject1).grantPermission()
-      await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
       // Confirm attestation was active.
       let view = await attestation.getAttestation(subject1.address)
@@ -144,7 +144,7 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('emits AttestationRevoked when deactivating a live attestation', async () => {
       await attestation.connect(subject1).grantPermission()
-      await attestation.connect(workflow).mintAttestation(subject1.address, 1)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
 
       await expect(attestation.connect(subject1).revokePermission())
         .to.emit(attestation, 'AttestationRevoked')
@@ -181,51 +181,51 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('reverts if caller is not workflowAddress', async () => {
       await expect(
-        attestation.connect(attacker).mintAttestation(subject1.address, 2)
+        attestation.connect(attacker).mintAttestation(subject1.address, 2, 0n)
       ).to.be.revertedWithCustomError(attestation, 'NotAuthorized')
     })
 
     it('reverts if subject has not granted permission', async () => {
       await expect(
-        attestation.connect(workflow).mintAttestation(subject2.address, 2)
+        attestation.connect(workflow).mintAttestation(subject2.address, 2, 0n)
       ).to.be.revertedWithCustomError(attestation, 'SubjectNotPermitted')
         .withArgs(subject2.address)
     })
 
     it('reverts for tier = 0 (below MIN_TIER)', async () => {
       await expect(
-        attestation.connect(workflow).mintAttestation(subject1.address, 0)
+        attestation.connect(workflow).mintAttestation(subject1.address, 0, 0n)
       ).to.be.revertedWithCustomError(attestation, 'InvalidTier')
         .withArgs(0)
     })
 
     it('reverts for tier = 6 (above MAX_TIER)', async () => {
       await expect(
-        attestation.connect(workflow).mintAttestation(subject1.address, 6)
+        attestation.connect(workflow).mintAttestation(subject1.address, 6, 0n)
       ).to.be.revertedWithCustomError(attestation, 'InvalidTier')
         .withArgs(6)
     })
 
     it('accepts tier = 1 (MIN_TIER)', async () => {
       await expect(
-        attestation.connect(workflow).mintAttestation(subject1.address, 1)
+        attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
       ).to.not.be.reverted
     })
 
     it('accepts tier = 5 (MAX_TIER)', async () => {
       await expect(
-        attestation.connect(workflow).mintAttestation(subject1.address, 5)
+        attestation.connect(workflow).mintAttestation(subject1.address, 5, 0n)
       ).to.not.be.reverted
     })
 
     it('stores tier correctly', async () => {
-      await attestation.connect(workflow).mintAttestation(subject1.address, 3)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
       const view = await attestation.getAttestation(subject1.address)
       expect(view.tier).to.equal(3)
     })
 
     it('stores expiry as block.timestamp + 86400', async () => {
-      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
       const block = await ethers.provider.getBlock(tx.blockNumber!)
       const expectedExpiry = BigInt(block!.timestamp) + ONE_DAY
       const view = await attestation.getAttestation(subject1.address)
@@ -233,13 +233,13 @@ describe('ConfidentialGuardAttestation', function () {
     })
 
     it('sets active = true', async () => {
-      await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
       const view = await attestation.getAttestation(subject1.address)
       expect(view.active).to.be.true
     })
 
     it('emits AttestationMinted with correct args', async () => {
-      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
       const block = await ethers.provider.getBlock(tx.blockNumber!)
       const expectedExpiry = BigInt(block!.timestamp) + ONE_DAY
 
@@ -249,11 +249,11 @@ describe('ConfidentialGuardAttestation', function () {
     })
 
     it('overwrites previous attestation on refresh (after cooldown)', async () => {
-      await attestation.connect(workflow).mintAttestation(subject1.address, 3)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
       // Must advance past MIN_MINT_INTERVAL before second mint is allowed.
       await ethers.provider.send('evm_increaseTime', [Number(SIX_HOURS)])
       await ethers.provider.send('evm_mine', [])
-      await attestation.connect(workflow).mintAttestation(subject1.address, 1) // upgrade
+      await attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n) // upgrade
       const view = await attestation.getAttestation(subject1.address)
       expect(view.tier).to.equal(1)
       expect(view.active).to.be.true
@@ -261,8 +261,8 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('correctly attests multiple distinct subjects', async () => {
       await attestation.connect(subject2).grantPermission()
-      await attestation.connect(workflow).mintAttestation(subject1.address, 1)
-      await attestation.connect(workflow).mintAttestation(subject2.address, 3)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
+      await attestation.connect(workflow).mintAttestation(subject2.address, 3, 0n)
 
       const v1 = await attestation.getAttestation(subject1.address)
       const v2 = await attestation.getAttestation(subject2.address)
@@ -280,17 +280,17 @@ describe('ConfidentialGuardAttestation', function () {
       it('first mint (cold write) is under 150,000 gas', async () => {
         // workflowAddress is now a mutable storage slot (not immutable), adding
         // a cold SLOAD (2100 gas) to the onlyWorkflow modifier. Cap raised accordingly.
-        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         const receipt = await tx.wait()
         expect(receipt!.gasUsed).to.be.lessThan(150_000n)
       })
 
       it('refresh (warm write) is under 60,000 gas', async () => {
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         // Advance past MIN_MINT_INTERVAL so second mint is allowed.
         await ethers.provider.send('evm_increaseTime', [Number(SIX_HOURS)])
         await ethers.provider.send('evm_mine', [])
-        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 1)
+        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
         const receipt = await tx.wait()
         // Refresh now touches 3 warm SSTOREs (attestation struct + _lastMintAt).
         // Total ≈ 3×2900 + 21k base + overhead ≈ 32k. Cap at 60k for safety.
@@ -306,7 +306,7 @@ describe('ConfidentialGuardAttestation', function () {
   describe('verifyAttestation', () => {
     beforeEach(async () => {
       await attestation.connect(subject1).grantPermission()
-      await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
     })
 
     it('returns valid=true when tier meets minTier (same tier)', async () => {
@@ -385,7 +385,7 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('returns correct data after minting', async () => {
       await attestation.connect(subject1).grantPermission()
-      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 3)
+      const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
       const block = await ethers.provider.getBlock(tx.blockNumber!)
 
       const view = await attestation.getAttestation(subject1.address)
@@ -398,7 +398,7 @@ describe('ConfidentialGuardAttestation', function () {
 
     it('returns active=false after revoke', async () => {
       await attestation.connect(subject1).grantPermission()
-      await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+      await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
       await attestation.connect(subject1).revokePermission()
 
       const view = await attestation.getAttestation(subject1.address)
@@ -409,7 +409,7 @@ describe('ConfidentialGuardAttestation', function () {
     describe('Gas profile: getAttestation', () => {
       it('estimateGas is under 35,000 gas (includes 21k base tx cost)', async () => {
         await attestation.connect(subject1).grantPermission()
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         const gas = await attestation.getAttestation.estimateGas(subject1.address)
         expect(gas).to.be.lessThan(35_000n)
       })
@@ -429,7 +429,7 @@ describe('ConfidentialGuardAttestation', function () {
       it(`mints tier ${tier} successfully`, async () => {
         // Each test runs in isolation (beforeEach deploys fresh contract),
         // so there is no cooldown conflict between iterations.
-        await attestation.connect(workflow).mintAttestation(subject1.address, tier)
+        await attestation.connect(workflow).mintAttestation(subject1.address, tier, 0n)
         const view = await attestation.getAttestation(subject1.address)
         expect(view.tier).to.equal(tier)
       })
@@ -499,7 +499,7 @@ describe('ConfidentialGuardAttestation', function () {
       it('reverts with EnforcedPause when contract is paused', async () => {
         await attestation.connect(owner).pause()
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 2)
+          attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         ).to.be.revertedWithCustomError(attestation, 'EnforcedPause')
       })
 
@@ -507,7 +507,7 @@ describe('ConfidentialGuardAttestation', function () {
         await attestation.connect(owner).pause()
         await attestation.connect(owner).unpause()
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 2)
+          attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         ).to.not.be.reverted
       })
     })
@@ -515,7 +515,7 @@ describe('ConfidentialGuardAttestation', function () {
     describe('revokePermission is NOT blocked by pause', () => {
       it('subject can revoke even when paused (data sovereignty)', async () => {
         await attestation.connect(subject1).grantPermission()
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         await attestation.connect(owner).pause()
 
         // Must not revert — user always has the right to opt out.
@@ -538,51 +538,51 @@ describe('ConfidentialGuardAttestation', function () {
 
       it('first mint always succeeds (no cooldown)', async () => {
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 2)
+          attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         ).to.not.be.reverted
       })
 
       it('second mint within 6 hours reverts with MintTooFrequent', async () => {
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
         // Only 1 second has passed — well within 6-hour cooldown.
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 3)
+          attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
         ).to.be.revertedWithCustomError(attestation, 'MintTooFrequent')
       })
 
       it('MintTooFrequent error includes subject address and nextAllowedAt', async () => {
-        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         const block = await ethers.provider.getBlock(tx.blockNumber!)
         const expectedNext = BigInt(block!.timestamp) + SIX_HOURS
 
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 3)
+          attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
         ).to.be.revertedWithCustomError(attestation, 'MintTooFrequent')
           .withArgs(subject1.address, expectedNext)
       })
 
       it('second mint succeeds after exactly MIN_MINT_INTERVAL', async () => {
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
         // Advance exactly 6 hours.
         await ethers.provider.send('evm_increaseTime', [Number(SIX_HOURS)])
         await ethers.provider.send('evm_mine', [])
 
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 1)
+          attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
         ).to.not.be.reverted
       })
 
       it('second mint succeeds after more than MIN_MINT_INTERVAL', async () => {
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
         // Advance 7 hours.
         await ethers.provider.send('evm_increaseTime', [25_200])
         await ethers.provider.send('evm_mine', [])
 
         await expect(
-          attestation.connect(workflow).mintAttestation(subject1.address, 3)
+          attestation.connect(workflow).mintAttestation(subject1.address, 3, 0n)
         ).to.not.be.reverted
       })
 
@@ -590,11 +590,11 @@ describe('ConfidentialGuardAttestation', function () {
         await attestation.connect(subject2).grantPermission()
 
         // Mint for subject1.
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
         // Subject2 has never been minted — first mint should always succeed.
         await expect(
-          attestation.connect(workflow).mintAttestation(subject2.address, 3)
+          attestation.connect(workflow).mintAttestation(subject2.address, 3, 0n)
         ).to.not.be.reverted
       })
     })
@@ -608,7 +608,7 @@ describe('ConfidentialGuardAttestation', function () {
 
       it('returns lastMint + 6 hours after first mint', async () => {
         await attestation.connect(subject1).grantPermission()
-        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        const tx = await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
         const block = await ethers.provider.getBlock(tx.blockNumber!)
         const expected = BigInt(block!.timestamp) + SIX_HOURS
 
@@ -617,12 +617,12 @@ describe('ConfidentialGuardAttestation', function () {
 
       it('updates after each successful mint', async () => {
         await attestation.connect(subject1).grantPermission()
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
 
         await ethers.provider.send('evm_increaseTime', [Number(SIX_HOURS)])
         await ethers.provider.send('evm_mine', [])
 
-        const tx2 = await attestation.connect(workflow).mintAttestation(subject1.address, 1)
+        const tx2 = await attestation.connect(workflow).mintAttestation(subject1.address, 1, 0n)
         const block2 = await ethers.provider.getBlock(tx2.blockNumber!)
         const expected = BigInt(block2!.timestamp) + SIX_HOURS
 
@@ -635,7 +635,7 @@ describe('ConfidentialGuardAttestation', function () {
     describe('isExpiringSoon', () => {
       beforeEach(async () => {
         await attestation.connect(subject1).grantPermission()
-        await attestation.connect(workflow).mintAttestation(subject1.address, 2)
+        await attestation.connect(workflow).mintAttestation(subject1.address, 2, 0n)
       })
 
       it('returns false for subject with no attestation', async () => {

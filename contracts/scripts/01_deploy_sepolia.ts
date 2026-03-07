@@ -102,15 +102,18 @@ async function main(): Promise<void> {
 
   // ── Step 1: Deploy ConfidentialGuardAttestation ──────────────────────────
   console.log('[1/5] Deploying ConfidentialGuardAttestation...')
-  console.log(`      - Initial workflow address: ${deployerAddress} (update after CRE registration)`)
   console.log(`      - Owner: ${deployerAddress}`)
 
   const AttestationFactory = await ethers.getContractFactory('ConfidentialGuardAttestation')
   const attestation = await AttestationFactory.deploy(
-    deployerAddress, // workflowAddress — placeholder, updated after CRE workflow registration
     deployerAddress, // owner
   )
   await attestation.waitForDeployment()
+
+  // Set deployer as placeholder workflow — overwritten by 04_set_workflow.ts after CRE registration
+  const setWfTx = await attestation.setWorkflowAddress(deployerAddress)
+  await setWfTx.wait()
+  console.log(`      - Workflow placeholder: ${deployerAddress} (update via 04_set_workflow.ts)`)
   const attestationAddress = await attestation.getAddress()
   const attestationTx = attestation.deploymentTransaction()
   const attestationReceipt = await attestationTx?.wait()
@@ -211,7 +214,7 @@ async function main(): Promise<void> {
   console.log()
   console.log('Etherscan verification:')
   console.log(`  npx hardhat verify --network sepolia ${attestationAddress} \\`)
-  console.log(`    "${deployerAddress}" "${deployerAddress}"`)
+  console.log(`    "${deployerAddress}"`)
   console.log()
   console.log(`  npx hardhat verify --network sepolia ${vaultAddress} \\`)
   console.log(`    "${SEPOLIA_CCIP_ROUTER}" "${SEPOLIA_ETH_USD_FEED}" "${deployerAddress}"`)
