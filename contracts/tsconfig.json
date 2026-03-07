@@ -12,6 +12,6 @@
     "skipLibCheck":     true,
     "types": ["node", "hardhat"]
   },
-  "include": ["hardhat.config.ts", "test/**/*.ts", "scripts/**/*.ts"],
+  "include": ["hardhat.config.ts", "test/**/*.ts", "scripts/**/*.ts", "typechain-types/**/*.ts", "typechain-types/**/*.d.ts"],
   "exclude": ["node_modules", "artifacts", "cache", "dist"]
 }

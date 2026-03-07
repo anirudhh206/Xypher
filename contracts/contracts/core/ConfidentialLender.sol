@@ -497,10 +497,10 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     if (hf >= BPS_DENOMINATOR) revert PositionHealthy(borrower, hf);
     if (msg.value < totalDebt)  revert InsufficientRepayment(msg.value, totalDebt);
 
-    // Collateral to seize = debt + 5% bonus (capped at full collateral)
-    uint256 debtInETH     = _usdToEth(totalDebt);
-    uint256 bonusETH      = (debtInETH * LIQUIDATION_BONUS_BPS) / BPS_DENOMINATOR;
-    uint256 collateralOut = debtInETH + bonusETH;
+    // Collateral to seize = debt + 5% bonus (capped at full collateral).
+    // Both collateral and debt are denominated in ETH so no USD conversion needed.
+    uint256 bonusETH      = (totalDebt * LIQUIDATION_BONUS_BPS) / BPS_DENOMINATOR;
+    uint256 collateralOut = totalDebt + bonusETH;
     if (collateralOut > pos.collateralAmount) {
       collateralOut = pos.collateralAmount; // Cap at full collateral
     }
