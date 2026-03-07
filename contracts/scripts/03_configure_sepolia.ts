@@ -59,15 +59,26 @@ async function main(): Promise<void> {
   const vaultAddress    = deployments.sepolia?.vault
   const receiverAddress = deployments.baseSepolia?.receiver
 
-  if (!vaultAddress) {
-    throw new Error('GuardianVault address not found. Run 01_deploy_sepolia.ts first.')
+  const addressRegex = /^0x[0-9a-fA-F]{40}$/
+
+  if (!vaultAddress || !addressRegex.test(vaultAddress)) {
+    throw new Error(`Invalid vault address in deployments.json: "${vaultAddress}". Re-run 01_deploy_sepolia.ts.`)
   }
-  if (!receiverAddress) {
-    throw new Error('CCIPGuardianReceiver address not found. Run 02_deploy_base_sepolia.ts first.')
+  if (!receiverAddress || !addressRegex.test(receiverAddress)) {
+    throw new Error(`Invalid receiver address in deployments.json: "${receiverAddress}". Re-run 02_deploy_base_sepolia.ts.`)
   }
 
   const [deployer] = await ethers.getSigners()
   const deployerAddress = await deployer.getAddress()
+
+  const balance = await ethers.provider.getBalance(deployerAddress)
+  const minimum = ethers.parseEther('0.005')
+  if (balance < minimum) {
+    throw new Error(
+      `Insufficient Sepolia ETH: ${ethers.formatEther(balance)} available, ` +
+      `~0.005 ETH required for configuration transactions`,
+    )
+  }
 
   console.log('=== ConfidentialGuard Protocol — Sepolia Configuration ===')
   console.log()
@@ -105,8 +116,18 @@ async function main(): Promise<void> {
   console.log(`      Guardian pool balance:  ${ethers.formatEther(poolBalance)} ETH`)
   console.log()
 
-  if (!isAllowed || registeredReceiver.toLowerCase() !== receiverAddress.toLowerCase()) {
-    throw new Error('Configuration verification failed — chain selector or receiver mismatch')
+  if (!isAllowed) {
+    throw new Error(
+      `Verification failed: Base Sepolia chain selector ${BASE_SEPOLIA_CHAIN_SELECTOR} ` +
+      `not marked as allowed on GuardianVault`,
+    )
+  }
+  if (registeredReceiver.toLowerCase() !== receiverAddress.toLowerCase()) {
+    throw new Error(
+      `Verification failed: registered receiver mismatch\n` +
+      `  Expected: ${receiverAddress}\n` +
+      `  Got:      ${registeredReceiver}`,
+    )
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────

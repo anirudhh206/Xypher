@@ -17,7 +17,7 @@
 // ============================================================
 
 import hre from 'hardhat'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 // ── Deployments Record ────────────────────────────────────────────────────────
@@ -25,7 +25,20 @@ const DEPLOYMENTS_FILE = join(__dirname, '..', 'deployments.json')
 
 interface DeploymentsRecord {
   sepolia?: {
-    attestation?: string
+    attestation?:      string
+    vault?:            string
+    deployer?:         string
+    deployedAt?:       string
+    attestationBlock?: number
+    vaultBlock?:       number
+    workflowAddress?:  string
+    workflowSetAt?:    string
+  }
+  baseSepolia?: {
+    receiver?:      string
+    deployer?:      string
+    deployedAt?:    string
+    receiverBlock?: number
   }
 }
 
@@ -36,6 +49,10 @@ function loadDeployments(): DeploymentsRecord {
   } catch {
     return {}
   }
+}
+
+function saveDeployments(data: DeploymentsRecord): void {
+  writeFileSync(DEPLOYMENTS_FILE, JSON.stringify(data, null, 2))
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -62,12 +79,23 @@ async function main(): Promise<void> {
   const deployments = loadDeployments()
   const attestationAddress = deployments.sepolia?.attestation
 
-  if (!attestationAddress) {
-    throw new Error('Attestation contract address not found. Run 01_deploy_sepolia.ts first.')
+  if (!attestationAddress || !/^0x[0-9a-fA-F]{40}$/.test(attestationAddress)) {
+    throw new Error(
+      'Attestation contract address missing or malformed in deployments.json. ' +
+      'Run 01_deploy_sepolia.ts first.',
+    )
   }
 
   const [deployer] = await ethers.getSigners()
   const deployerAddress = await deployer.getAddress()
+
+  const balance = await ethers.provider.getBalance(deployerAddress)
+  if (balance < ethers.parseEther('0.005')) {
+    throw new Error(
+      `Deployer balance too low: ${ethers.formatEther(balance)} ETH. ` +
+      'Need at least 0.005 ETH for setWorkflowAddress TX.',
+    )
+  }
 
   console.log('=== ConfidentialGuard Protocol — Update Workflow Address ===')
   console.log()
@@ -106,6 +134,14 @@ async function main(): Promise<void> {
       `expected ${newWorkflowAddress}`,
     )
   }
+
+  // ── Persist to deployments.json ──────────────────────────────────────────
+  deployments.sepolia = {
+    ...deployments.sepolia,
+    workflowAddress: newWorkflowAddress,
+    workflowSetAt: new Date().toISOString(),
+  }
+  saveDeployments(deployments)
 
   console.log('=== UPDATE COMPLETE ===')
   console.log()

@@ -20,10 +20,12 @@
 //   Steps 2–4 compute the full financial picture inside the TEE.
 //   Only `tier` (uint8 1–5) is written on-chain. No position
 //   amounts, health factors, or raw scores are ever exposed.
+//   Logs use keccak256 prefix tags — never raw addresses or scores.
 // ============================================================
 
 import {
   EVMClient,
+  TxStatus,
   hexToBase64,
   bytesToHex,
   encodeCallMsg,
@@ -34,6 +36,7 @@ import type { Runtime } from '@chainlink/cre-sdk'
 import {
   keccak256,
   stringToBytes,
+  toBytes,
   type Address,
   encodeFunctionData,
   decodeAbiParameters,
@@ -46,12 +49,16 @@ import type { WorkflowConfig } from './config'
 import { aggregatePositions } from './position-aggregator'
 import { mintAttestation } from './attestation-minter'
 
+// ── Privacy helper ────────────────────────────────────────────
+// Never log raw wallet addresses from a TEE workflow.
+// 5-byte keccak256 prefix gives traceability without exposure.
+const tag = (addr: string): string => keccak256(toBytes(addr)).slice(0, 12)
+
 // ── Constants ─────────────────────────────────────────────────
 
-const SEPOLIA_CHAIN_SELECTOR =
-  EVMClient.SUPPORTED_CHAIN_SELECTORS['ethereum-testnet-sepolia']
-
-// Event topic: keccak256("PermissionGranted(address)")
+// IMPORTANT: Must match IConfidentialGuard.sol exactly:
+// event PermissionGranted(address indexed subject)
+// Canonical form (no param names, no 'indexed'): PermissionGranted(address)
 const PERMISSION_GRANTED_TOPIC: string = keccak256(
   stringToBytes('PermissionGranted(address)'),
 )
@@ -85,6 +92,24 @@ const WBTC_ADDRESS_SEPOLIA = '0x29f2d40b0605204364af54ec677bd022da425d03'
 // ── Helpers ───────────────────────────────────────────────────
 
 /**
+ * Resolves EVMClient from runtime config chain selector.
+ * Single source of truth — no hardcoded Sepolia constant.
+ */
+function resolveEvmClient(runtime: Runtime<WorkflowConfig>): EVMClient {
+  type ChainName = keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
+  const chainSelectorName = runtime.config.chainSelectorName as ChainName
+  const chainSelector = EVMClient.SUPPORTED_CHAIN_SELECTORS[chainSelectorName]
+
+  if (!chainSelector) {
+    throw new Error(
+      `[RiskEngineWorkflow] Unsupported chainSelectorName: ${chainSelectorName}`,
+    )
+  }
+
+  return new EVMClient(chainSelector)
+}
+
+/**
  * Extracts the subject address from the PermissionGranted log.
  *
  * topics[0] = event signature hash  (32 bytes)
@@ -104,7 +129,7 @@ function extractSubjectFromLog(log: EVMLog, runtime: Runtime<WorkflowConfig>): A
   const address = `0x${topicHex.slice(-40)}` as Address
 
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
-    runtime.log(`[RiskEngineWorkflow] Could not parse subject from topic: ${topicHex}`)
+    runtime.log(`[RiskEngineWorkflow] Could not parse subject from topic`)
     return null
   }
 
@@ -157,13 +182,13 @@ function fetchChainlinkPrice(
     )
 
     if (answer <= 0n) {
-      runtime.log(`[RiskEngineWorkflow] Invalid ${symbol} price: ${answer}`)
+      runtime.log(`[RiskEngineWorkflow] Invalid ${symbol} price`)
       return null
     }
 
     // Chainlink answer is int256 with 8 decimals → scale to 1e18
     const priceWei = BigInt(answer) * 10_000_000_000n // × 1e10
-    runtime.log(`[RiskEngineWorkflow] ${symbol}/USD = ${priceWei}`)
+    runtime.log(`[RiskEngineWorkflow] ${symbol}/USD feed resolved`)
     return priceWei
   } catch (err: unknown) {
     runtime.log(`[RiskEngineWorkflow] Failed to fetch ${symbol} price: ${String(err)}`)
@@ -178,7 +203,17 @@ function fetchChainlinkPrice(
  * The trigger fires every time a user calls grantPermission().
  */
 export function createRiskEngineTrigger(config: WorkflowConfig) {
-  const evmClient = new EVMClient(SEPOLIA_CHAIN_SELECTOR)
+  type ChainName = keyof typeof EVMClient.SUPPORTED_CHAIN_SELECTORS
+  const chainSelectorName = config.chainSelectorName as ChainName
+  const chainSelector = EVMClient.SUPPORTED_CHAIN_SELECTORS[chainSelectorName]
+
+  if (!chainSelector) {
+    throw new Error(
+      `[RiskEngineWorkflow] Unsupported chainSelectorName: ${chainSelectorName}`,
+    )
+  }
+
+  const evmClient = new EVMClient(chainSelector)
 
   return evmClient.logTrigger({
     // 20-byte contract address, base64-encoded for protobuf JSON
@@ -211,18 +246,19 @@ export function riskEngineHandler(
     return JSON.stringify({ ok: false, reason: 'invalid_log' })
   }
 
-  runtime.log(`[RiskEngineWorkflow] Subject: ${subject}`)
+  const subjectTag = tag(subject)
+  runtime.log(`[RiskEngineWorkflow] Subject: ${subjectTag}…`)
 
   // ── Step 2: Aggregate positions (Aave + Morpho + Compound + Plaid) ──
   const { positions, plaidData } = aggregatePositions(runtime, subject)
 
   if (positions.length === 0 && plaidData === null) {
     runtime.log('[RiskEngineWorkflow] No positions or Plaid data — skipping mint')
-    return JSON.stringify({ ok: false, reason: 'no_data', subject })
+    return JSON.stringify({ ok: false, reason: 'no_data', subjectTag })
   }
 
   // ── Step 3: Fetch live prices from Chainlink Data Feeds ───
-  const evmClient = new EVMClient(SEPOLIA_CHAIN_SELECTOR)
+  const evmClient = resolveEvmClient(runtime)
 
   const ethPrice = fetchChainlinkPrice(evmClient, runtime, ETH_USD_FEED_SEPOLIA, 'ETH')
   const btcPrice = fetchChainlinkPrice(evmClient, runtime, BTC_USD_FEED_SEPOLIA, 'BTC')
@@ -230,6 +266,12 @@ export function riskEngineHandler(
   const rawPrices: Record<string, bigint> = {}
   if (ethPrice !== null) rawPrices[WETH_ADDRESS_SEPOLIA] = ethPrice
   if (btcPrice !== null) rawPrices[WBTC_ADDRESS_SEPOLIA] = btcPrice
+
+  // Abort if no prices — prevents minting an incorrect tier on-chain
+  if (Object.keys(rawPrices).length === 0) {
+    runtime.log('[RiskEngineWorkflow] No prices available — aborting to prevent incorrect attestation')
+    return JSON.stringify({ ok: false, reason: 'no_prices', subjectTag })
+  }
 
   // CANONICAL_USD_ASSET is always $1.00 — set in buildPriceMap automatically
   const prices = buildPriceMap(rawPrices)
@@ -239,29 +281,26 @@ export function riskEngineHandler(
 
   const scoreDetails = computeCreditScore(positions, prices, plaidData)
 
+  // Privacy: log only tier — never UHF, contagion, DSS, or cascade values
   runtime.log(
-    `[RiskEngineWorkflow] ` +
-    `UHF=${scoreDetails.creditScore.unifiedHealthFactor.toFixed(4)} ` +
-    `Tier=${scoreDetails.creditScore.tier} ` +
-    `Contagion=${scoreDetails.creditScore.contagionRiskScore} ` +
-    `DSS=${scoreDetails.creditScore.debtServiceabilityScore} ` +
-    `CascadeAt=${(scoreDetails.creditScore.cascadeThreshold * 100).toFixed(1)}%`,
+    `[RiskEngineWorkflow] Credit assessment complete — ` +
+    `tier=${scoreDetails.creditScore.tier} for ${subjectTag}…`,
   )
 
   // ── Step 5: Mint on-chain attestation ─────────────────────
   // ONLY `tier` goes on-chain. All other scores are discarded here.
   try {
-    mintAttestation(runtime, subject, scoreDetails.creditScore.tier)
+    const mintResult = mintAttestation(runtime, subject, scoreDetails.creditScore.tier)
     runtime.log(
-      `[RiskEngineWorkflow] ✓ Attestation minted — ` +
-      `subject=${subject} tier=${scoreDetails.creditScore.tier}`,
+      `[RiskEngineWorkflow] Attestation confirmed — ` +
+      `tier=${mintResult.tier} txStatus=${TxStatus[mintResult.txStatus]} for ${subjectTag}…`,
     )
   } catch (err: unknown) {
-    runtime.log(`[RiskEngineWorkflow] Mint failed: ${String(err)}`)
+    runtime.log(`[RiskEngineWorkflow] Mint failed for ${subjectTag}…: ${String(err)}`)
     return JSON.stringify({
       ok: false,
       reason: 'mint_failed',
-      subject,
+      subjectTag,
       error: String(err),
     })
   }
@@ -270,7 +309,7 @@ export function riskEngineHandler(
 
   return JSON.stringify({
     ok: true,
-    subject,
+    subjectTag,
     tier: scoreDetails.creditScore.tier,
   })
 }

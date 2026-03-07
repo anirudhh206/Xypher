@@ -1,34 +1,8 @@
-// ============================================================
-// ConfidentialGuard Protocol — Base Sepolia Deployment Script
-// scripts/02_deploy_base_sepolia.ts
-//
-// Deploys to Base Sepolia:
-//   CCIPGuardianReceiver — receives cross-chain guardian alerts
-//
-// Run with:
-//   npx hardhat run scripts/02_deploy_base_sepolia.ts --network base-sepolia
-//
-// Prerequisites:
-//   - 01_deploy_sepolia.ts must have been run (reads VAULT_ADDRESS from deployments.json)
-//
-// After this script:
-//   - Run 03_configure_sepolia.ts with the receiver address
-//   - Run 03b_configure_base_sepolia.ts to register the source chain
-// ============================================================
-
 import hre from 'hardhat'
 import { writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-
-// ── Base Sepolia Chainlink Addresses ──────────────────────────────────────────
-// Source: https://docs.chain.link/ccip/supported-networks/v1_2_0/testnet
 const BASE_SEPOLIA_CCIP_ROUTER = '0xD3b06cEbF099CE7DA4AcCf578aaebFDBd6e88a93'
-
-// CCIP chain selector for Ethereum Sepolia (source chain)
-// Source: https://docs.chain.link/ccip/supported-networks/v1_2_0/testnet#ethereum-sepolia
 const SEPOLIA_CHAIN_SELECTOR = 16015286601757825753n
-
-// ── Deployment Record ─────────────────────────────────────────────────────────
 const DEPLOYMENTS_FILE = join(__dirname, '..', 'deployments.json')
 
 interface DeploymentsRecord {
@@ -78,10 +52,10 @@ async function main(): Promise<void> {
   const deployments = loadDeployments()
   const sepoliaVaultAddress = deployments.sepolia?.vault
 
-  if (!sepoliaVaultAddress) {
+  if (!sepoliaVaultAddress || !/^0x[0-9a-fA-F]{40}$/.test(sepoliaVaultAddress)) {
     throw new Error(
-      'Sepolia GuardianVault address not found in deployments.json. ' +
-      'Run 01_deploy_sepolia.ts first.',
+      `Invalid Sepolia vault address in deployments.json: "${sepoliaVaultAddress}". ` +
+      'Re-run 01_deploy_sepolia.ts.',
     )
   }
 
@@ -94,6 +68,13 @@ async function main(): Promise<void> {
   console.log(`Deployer: ${deployerAddress}`)
 
   const deployerBalance = await ethers.provider.getBalance(deployerAddress)
+  const minimumRequired = ethers.parseEther('0.01')
+  if (deployerBalance < minimumRequired) {
+    throw new Error(
+      `Insufficient Base Sepolia ETH: ${ethers.formatEther(deployerBalance)} available, ` +
+      `${ethers.formatEther(minimumRequired)} required`,
+    )
+  }
   console.log(`Balance:  ${ethers.formatEther(deployerBalance)} ETH`)
   console.log()
   console.log(`Sepolia GuardianVault: ${sepoliaVaultAddress} (from deployments.json)`)
@@ -112,7 +93,11 @@ async function main(): Promise<void> {
   await receiver.waitForDeployment()
   const receiverAddress = await receiver.getAddress()
   const receiverTx = receiver.deploymentTransaction()
-  const receiverBlock = (await receiverTx?.wait())?.blockNumber ?? 0
+  const receiverReceipt = await receiverTx?.wait()
+  if (!receiverReceipt?.blockNumber) {
+    throw new Error('Could not get receiver deployment block number')
+  }
+  const receiverBlock = receiverReceipt.blockNumber
 
   console.log(`      Deployed at: ${receiverAddress}`)
   console.log(`      Block:        ${receiverBlock}`)

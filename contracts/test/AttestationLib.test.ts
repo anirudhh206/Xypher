@@ -1,18 +1,3 @@
-// ============================================================
-// ConfidentialGuard Protocol — AttestationLib Test Suite
-// contracts/test/AttestationLib.test.ts
-//
-// AttestationLib is an internal library (no external deployment).
-// Tests exercise all branches via ConfidentialGuardAttestation integration.
-//
-// Invariants verified:
-//   1. computeSubjectHash is deterministic for (subject, chainId)
-//   2. computeExpiry = timestamp + 86400 exactly
-//   3. validateTier reverts for 0 and 6, passes for 1-5
-//   4. isValid returns true only when all three conditions hold
-//   5. isExpired uses strict greater-than (at expiry = still valid)
-// ============================================================
-
 import { expect }    from 'chai'
 import { ethers }    from 'hardhat'
 import type { HardhatEthersSigner } from '@nomicfoundation/hardhat-ethers/signers'

@@ -113,7 +113,11 @@ async function main(): Promise<void> {
   await attestation.waitForDeployment()
   const attestationAddress = await attestation.getAddress()
   const attestationTx = attestation.deploymentTransaction()
-  const attestationBlock = (await attestationTx?.wait())?.blockNumber ?? 0
+  const attestationReceipt = await attestationTx?.wait()
+  if (!attestationReceipt?.blockNumber) {
+    throw new Error('Could not get attestation deployment block number')
+  }
+  const attestationBlock = attestationReceipt.blockNumber
 
   console.log(`      Deployed at: ${attestationAddress}`)
   console.log(`      Block:        ${attestationBlock}`)
@@ -135,7 +139,11 @@ async function main(): Promise<void> {
   await vault.waitForDeployment()
   const vaultAddress = await vault.getAddress()
   const vaultTx = vault.deploymentTransaction()
-  const vaultBlock = (await vaultTx?.wait())?.blockNumber ?? 0
+  const vaultReceipt = await vaultTx?.wait()
+  if (!vaultReceipt?.blockNumber) {
+    throw new Error('Could not get vault deployment block number')
+  }
+  const vaultBlock = vaultReceipt.blockNumber
 
   console.log(`      Deployed at: ${vaultAddress}`)
   console.log(`      Block:        ${vaultBlock}`)
