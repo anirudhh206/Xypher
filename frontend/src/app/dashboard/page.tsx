@@ -1,885 +1,1380 @@
 "use client";
+
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import {
-  useAccount, useConnect, useDisconnect, useBalance,
-  useReadContract, useWriteContract, useWaitForTransactionReceipt,
-} from "wagmi";
+import { parseEther } from "viem";
+import { useAccount, useConnect, useDisconnect, useWriteContract } from "wagmi";
 import { injected } from "wagmi/connectors";
-import { parseEther, formatEther, isAddress } from "viem";
 import {
-  CONTRACTS, ATTESTATION_ABI, LENDER_ABI, FEED_ABI, NFT_ABI, OWNABLE_ABI,
-  TIER_NAMES, TIER_RATES, TIER_COLORS, SEPOLIA_EXPLORER,
+  CONTRACTS,
+  ATTESTATION_ABI,
+  LENDER_ABI,
+  TIER_NAMES,
+  TIER_COLORS,
+  SEPOLIA_EXPLORER,
 } from "@/lib/contracts";
+import {
+  useUserPositions,
+  useUserCreditScore,
+  useUserLoans,
+  useAttestation,
+  useLiveETHPrice,
+  useLiveBTCPrice,
+  type UserCreditScore,
+} from "@/hooks/useRiskEngine";
+import { useDepositCollateral, useRepay, useWithdrawCollateral } from "@/hooks/useLending";
+import { getTierLTV } from "@/lib/risk-engine";
 
-type Tab = "overview" | "borrow" | "position" | "verify" | "settings";
+type Tab = "overview" | "positions" | "attestation" | "borrow" | "settings";
 
-// ── Helpers ────────────────────────────────────────────────────────────────
 function shortAddr(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
-function formatPrice(raw: bigint | undefined): string {
-  if (!raw) return "—";
-  return `$${(Number(raw) / 1e8).toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
-}
-function formatExpiry(expiry: bigint | undefined): { label: string; pct: number } {
-  if (!expiry) return { label: "—", pct: 0 };
-  const now = Math.floor(Date.now() / 1000);
-  const remaining = Number(expiry) - now;
-  if (remaining <= 0) return { label: "Expired", pct: 0 };
-  const h = Math.floor(remaining / 3600);
-  const m = Math.floor((remaining % 3600) / 60);
-  return { label: `${h}h ${m}m`, pct: Math.min(100, (remaining / 86400) * 100) };
-}
-function hfColor(hf: number) {
-  return hf > 2.5 ? "#10b981" : hf > 1.5 ? "#f59e0b" : "#ef4444";
-}
-// Health factor is returned in BPS (10000 = 1.0x)
-function hfFromBps(bps: bigint | undefined): string {
-  if (!bps) return "—";
-  if (bps === BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")) return "∞";
-  return (Number(bps) / 10000).toFixed(2);
+
+function fmt$(usd: number, decimals = 0): string {
+  return `$${usd.toLocaleString("en-US", { maximumFractionDigits: decimals })}`;
 }
 
-// ── Price ticker ───────────────────────────────────────────────────────────
+function fmtETH(eth: number, decimals = 4): string {
+  return `${eth.toFixed(decimals)} ETH`;
+}
+
+function hfColor(hf: number) {
+  if (hf === 0) return "var(--muted)";
+  return hf > 2.0 ? "#10b981" : hf > 1.2 ? "#f59e0b" : "#ef4444";
+}
+
+function hfLabel(hf: number): string {
+  if (hf === 0) return "—";
+  if (hf >= 999) return "∞";
+  return hf.toFixed(2);
+}
+
+const CARD = {
+  padding: "12px",
+  background: "rgba(8,145,178,0.06)",
+  borderRadius: "6px",
+  border: "1px solid rgba(8,145,178,0.12)",
+  fontSize: "12px",
+} as const;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PRICE TICKER — live Chainlink feed data
+// ─────────────────────────────────────────────────────────────────────────────
+
 function PriceTicker() {
-  const { data: ethData } = useReadContract({ address: CONTRACTS.ethUsdFeed, abi: FEED_ABI, functionName: "latestRoundData" });
-  const { data: btcData } = useReadContract({ address: CONTRACTS.btcUsdFeed, abi: FEED_ABI, functionName: "latestRoundData" });
+  const ethPrice = useLiveETHPrice();
+  const btcPrice = useLiveBTCPrice();
+  const live = ethPrice > 0;
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-      <div style={{ display: "flex", gap: "6px", alignItems: "center", padding: "4px 10px", background: "var(--card)", border: "1px solid rgba(8,145,178,0.15)", fontSize: "11px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          padding: "4px 12px",
+          background: "var(--card)",
+          border: "1px solid rgba(8,145,178,0.15)",
+          fontSize: "11px",
+        }}
+      >
         <span style={{ color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>ETH</span>
-        <span style={{ fontWeight: 700, color: "var(--slate)", fontFamily: "Space Mono,monospace" }}>{formatPrice(ethData?.[1])}</span>
+        <span style={{ fontWeight: 700, color: "var(--slate)", fontFamily: "Space Mono,monospace" }}>
+          {live ? fmt$(ethPrice) : "…"}
+        </span>
       </div>
-      <div style={{ display: "flex", gap: "6px", alignItems: "center", padding: "4px 10px", background: "var(--card)", border: "1px solid rgba(8,145,178,0.15)", fontSize: "11px" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          padding: "4px 12px",
+          background: "var(--card)",
+          border: "1px solid rgba(8,145,178,0.15)",
+          fontSize: "11px",
+        }}
+      >
         <span style={{ color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>BTC</span>
-        <span style={{ fontWeight: 700, color: "var(--slate)", fontFamily: "Space Mono,monospace" }}>{formatPrice(btcData?.[1])}</span>
+        <span style={{ fontWeight: 700, color: "var(--slate)", fontFamily: "Space Mono,monospace" }}>
+          {live ? fmt$(btcPrice) : "…"}
+        </span>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "10px", color: "#10b981", fontFamily: "Space Mono,monospace" }}>
-        <div style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#10b981" }} className="pulse-cyan" />
-        Chainlink Live
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "5px",
+          fontSize: "10px",
+          color: live ? "#10b981" : "var(--muted)",
+          fontFamily: "Space Mono,monospace",
+        }}
+      >
+        <div
+          style={{
+            width: "5px",
+            height: "5px",
+            borderRadius: "50%",
+            background: live ? "#10b981" : "var(--muted)",
+          }}
+          className={live ? "pulse-cyan" : undefined}
+        />
+        {live ? "Live · Chainlink" : "Loading…"}
       </div>
     </div>
   );
 }
 
-// ── Wallet sidebar section ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// WALLET SECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
 function WalletSection() {
   const { address, isConnected } = useAccount();
   const { mutate: connect } = useConnect();
   const { mutate: disconnect } = useDisconnect();
-  const { data: balance } = useBalance({ address });
 
   if (!isConnected) {
     return (
       <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(8,145,178,0.08)" }}>
-        <button type="button" onClick={() => connect({ connector: injected() })} className="btn-cyan"
-          style={{ width: "100%", justifyContent: "center", padding: "10px", fontSize: "10px", clipPath: "polygon(6px 0%,100% 0%,calc(100% - 6px) 100%,0% 100%)" }}>
-          Connect MetaMask
+        <button
+          onClick={() => connect({ connector: injected() })}
+          style={{
+            width: "100%",
+            padding: "10px 16px",
+            background: "linear-gradient(135deg, var(--cyan), #06b6d4)",
+            border: "none",
+            color: "#ffffff",
+            fontWeight: 700,
+            cursor: "pointer",
+            fontSize: "12px",
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+            borderRadius: "4px",
+          }}
+        >
+          Connect Wallet
         </button>
-        <div style={{ fontSize: "10px", color: "var(--muted)", textAlign: "center", marginTop: "8px", fontFamily: "Space Mono,monospace" }}>Sepolia Testnet required</div>
       </div>
     );
   }
+
   return (
     <div style={{ padding: "14px 16px", borderBottom: "1px solid rgba(8,145,178,0.08)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", background: "rgba(8,145,178,0.05)", border: "1px solid rgba(8,145,178,0.12)" }}>
-        <div style={{ width: "30px", height: "30px", background: "linear-gradient(135deg,#4f46e5,#0b4a57)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 700, flexShrink: 0, clipPath: "polygon(4px 0%,100% 0%,calc(100% - 4px) 100%,0% 100%)" }}>
-          {address ? address.slice(2, 4).toUpperCase() : "??"}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--slate)", lineHeight: 1.2 }}>{address ? shortAddr(address) : "—"}</div>
-          <div style={{ fontSize: "10px", color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>{balance ? `${Number(formatEther(balance.value)).toFixed(4)} ETH` : "Loading…"}</div>
-        </div>
-        <div style={{ width: "7px", height: "7px", borderRadius: "50%", background: "#10b981", flexShrink: 0 }} />
+      <div
+        style={{
+          fontSize: "10px",
+          color: "var(--muted)",
+          marginBottom: "6px",
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+        }}
+      >
+        Connected
       </div>
-      <button type="button" onClick={() => disconnect()}
-        style={{ width: "100%", marginTop: "8px", padding: "6px", background: "transparent", color: "var(--muted)", border: "1px solid rgba(0,0,0,0.1)", fontSize: "9px", fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", cursor: "pointer", fontFamily: "Space Mono,monospace" }}>
+      <div
+        style={{
+          fontFamily: "Space Mono,monospace",
+          fontSize: "12px",
+          fontWeight: 700,
+          color: "var(--slate)",
+          marginBottom: "8px",
+        }}
+      >
+        {shortAddr(address!)}
+      </div>
+      <button
+        onClick={() => disconnect()}
+        style={{
+          width: "100%",
+          padding: "6px 12px",
+          background: "rgba(8,145,178,0.1)",
+          border: "1px solid rgba(8,145,178,0.2)",
+          color: "var(--cyan)",
+          fontWeight: 600,
+          cursor: "pointer",
+          fontSize: "11px",
+          textTransform: "uppercase",
+          borderRadius: "3px",
+        }}
+      >
         Disconnect
       </button>
     </div>
   );
 }
 
-// ── Main dashboard ─────────────────────────────────────────────────────────
-export default function Dashboard() {
-  const [tab, setTab] = useState<Tab>("overview");
-  const [txMsg, setTxMsg] = useState<string | null>(null);
-  const [txErr, setTxErr] = useState<string | null>(null);
+// ─────────────────────────────────────────────────────────────────────────────
+// CREDIT SCORE CARD
+// ─────────────────────────────────────────────────────────────────────────────
 
-  // Borrow tab state
-  const [collateralInput, setCollateralInput] = useState("0.1");
-  const [borrowInput, setBorrowInput] = useState("0.05");
+function CreditScoreCard({ score }: { score: UserCreditScore }) {
+  if (score.loading) {
+    return <div style={{ padding: "16px", color: "var(--muted)" }}>Computing credit score…</div>;
+  }
 
-  // Verify tab state
-  const [verifyAddr, setVerifyAddr] = useState("");
-  const [verifyResult, setVerifyResult] = useState<{ valid: boolean; tier: number; expiry: bigint } | null>(null);
+  if (!score.score) {
+    return (
+      <div style={{ padding: "16px", fontSize: "13px", color: "var(--slate2)", lineHeight: 1.7 }}>
+        No external DeFi positions found.
+        <br />
+        <span style={{ fontSize: "11px", color: "var(--muted)" }}>
+          Deposit collateral to Aave or Morpho on Sepolia, or use our lender below.
+        </span>
+      </div>
+    );
+  }
 
-  const { address, isConnected } = useAccount();
-
-  // ── Attestation (real on-chain) ──────────────────────────────────────────
-  const { data: attestData, refetch: refetchAttest } = useReadContract({
-    address: CONTRACTS.attestation,
-    abi: ATTESTATION_ABI,
-    functionName: "verifyAttestation",
-    args: [address ?? "0x0000000000000000000000000000000000000000", 1],
-    query: { enabled: !!address, refetchInterval: 20_000 },
-  });
-  const { data: hasPerm, refetch: refetchPerm } = useReadContract({
-    address: CONTRACTS.attestation,
-    abi: ATTESTATION_ABI,
-    functionName: "hasPermission",
-    args: [address ?? "0x0000000000000000000000000000000000000000"],
-    query: { enabled: !!address, refetchInterval: 15_000 },
-  });
-
-  // ── Real loan position (real on-chain) ───────────────────────────────────
-  const { data: positionData, refetch: refetchPosition } = useReadContract({
-    address: CONTRACTS.lender,
-    abi: LENDER_ABI,
-    functionName: "getPosition",
-    args: [address ?? "0x0000000000000000000000000000000000000000"],
-    query: { enabled: !!address, refetchInterval: 20_000 },
-  });
-  const { data: maxBorrowData } = useReadContract({
-    address: CONTRACTS.lender,
-    abi: LENDER_ABI,
-    functionName: "getMaxBorrow",
-    args: [address ?? "0x0000000000000000000000000000000000000000"],
-    query: { enabled: !!address },
-  });
-  const { data: poolStats, refetch: refetchPool } = useReadContract({
-    address: CONTRACTS.lender,
-    abi: LENDER_ABI,
-    functionName: "getPoolStats",
-    query: { refetchInterval: 30_000 },
-  });
-  const { data: tier1Rate } = useReadContract({
-    address: CONTRACTS.lender,
-    abi: LENDER_ABI,
-    functionName: "tierRates",
-    args: [1],
-  });
-  const { data: nftSupply } = useReadContract({
-    address: CONTRACTS.nft,
-    abi: NFT_ABI,
-    functionName: "totalSupply",
-    query: { refetchInterval: 60_000 },
-  });
-  const { data: attestOwner } = useReadContract({
-    address: CONTRACTS.attestation,
-    abi: OWNABLE_ABI,
-    functionName: "owner",
-  });
-
-  // ── Verify-any-address read ───────────────────────────────────────────────
-  const { data: verifyData, refetch: doVerify, isFetching: isVerifying } = useReadContract({
-    address: CONTRACTS.attestation,
-    abi: ATTESTATION_ABI,
-    functionName: "verifyAttestation",
-    args: [isAddress(verifyAddr) ? verifyAddr as `0x${string}` : "0x0000000000000000000000000000000000000000", 1],
-    query: { enabled: false },
-  });
-  useEffect(() => {
-    if (verifyData) setVerifyResult({ valid: verifyData[0], tier: verifyData[1], expiry: verifyData[2] });
-  }, [verifyData]);
-
-  // ── Writes ────────────────────────────────────────────────────────────────
-  const { mutate: grantPerm, data: grantHash, isPending: isGranting } = useWriteContract();
-  const { mutate: revokePerm, data: revokeHash, isPending: isRevoking } = useWriteContract();
-  const { mutate: doDeposit, data: depositHash, isPending: isDepositing } = useWriteContract();
-  const { mutate: doBorrow, data: borrowHash, isPending: isBorrowing } = useWriteContract();
-  const { mutate: doRepay, data: repayHash, isPending: isRepaying } = useWriteContract();
-  const { mutate: doWithdraw, data: withdrawHash, isPending: isWithdrawing } = useWriteContract();
-
-  const { isLoading: grantPending, isSuccess: grantDone } = useWaitForTransactionReceipt({ hash: grantHash });
-  const { isLoading: depositPending, isSuccess: depositDone } = useWaitForTransactionReceipt({ hash: depositHash });
-  const { isLoading: borrowPending, isSuccess: borrowDone } = useWaitForTransactionReceipt({ hash: borrowHash });
-  const { isLoading: repayPending, isSuccess: repayDone } = useWaitForTransactionReceipt({ hash: repayHash });
-
-  useEffect(() => { if (grantDone) { refetchPerm(); setTxMsg("Permission granted — TEE will score your credit in the next 5-min cycle"); } }, [grantDone, refetchPerm]);
-  useEffect(() => { if (depositDone) { refetchPosition(); setTxMsg("Collateral deposited on-chain"); } }, [depositDone, refetchPosition]);
-  useEffect(() => { if (borrowDone) { refetchPosition(); refetchPool(); setTxMsg("Loan funded — funds sent to your wallet"); } }, [borrowDone, refetchPosition, refetchPool]);
-  useEffect(() => { if (repayDone) { refetchPosition(); refetchPool(); setTxMsg("Loan repaid — collateral released"); } }, [repayDone, refetchPosition, refetchPool]);
-
-  // ── Derived state ─────────────────────────────────────────────────────────
-  const [isAttested, tier, expiryRaw] = attestData ?? [false, undefined, undefined];
-  const expiry    = formatExpiry(expiryRaw);
-  const tierColor = tier ? TIER_COLORS[tier] : "var(--muted)";
-  const tierName  = tier ? TIER_NAMES[tier] : "—";
-  const tierRate  = tier ? TIER_RATES[tier] : "—";
-
-  // positionData = [collateral, borrowed, interest, tier, healthFactor] — all bigint
-  const [posCollateral, posBorrowed, posInterest, posTier, posHF] = positionData ?? [];
-  const hasLoan = posBorrowed !== undefined && posBorrowed > 0n;
-  const hasCollateral = posCollateral !== undefined && posCollateral > 0n;
-
-  // Pool stats = [liquidity, borrowed, available, utilisationBps]
-  const [poolLiquidity, poolBorrowed, poolAvailable, poolUtil] = poolStats ?? [];
-
-  const [maxBorrowWei] = maxBorrowData ?? [];
-
-  const NavItem = ({ t, icon, label }: { t: Tab; icon: string; label: string }) => (
-    <button type="button" onClick={() => setTab(t)}
-      style={{ display: "flex", alignItems: "center", gap: "10px", width: "100%", padding: "10px 20px", background: tab === t ? "rgba(8,145,178,0.08)" : "transparent", border: "none", borderLeft: `2px solid ${tab === t ? "var(--cyan)" : "transparent"}`, color: tab === t ? "var(--cyan)" : "var(--muted)", fontSize: "13px", fontWeight: 500, cursor: "pointer", transition: "all .2s", textAlign: "left" }}
-      onMouseEnter={e => { if (tab !== t) (e.currentTarget as HTMLElement).style.color = "var(--slate2)"; }}
-      onMouseLeave={e => { if (tab !== t) (e.currentTarget as HTMLElement).style.color = "var(--muted)"; }}
-    >
-      <span style={{ fontSize: "15px", width: "18px", textAlign: "center" }}>{icon}</span>
-      {label}
-    </button>
-  );
+  const { tier, unifiedHealthFactor, contagionScore, debtServiceabilityScore } = score.score;
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh", background: "var(--void)", color: "var(--slate)" }}>
+    <div style={{ padding: "16px" }}>
+      <div style={{ marginBottom: "16px" }}>
+        <div
+          style={{
+            fontSize: "11px",
+            color: "var(--muted)",
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            marginBottom: "4px",
+          }}
+        >
+          Credit Tier
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div
+            style={{
+              width: "48px",
+              height: "48px",
+              borderRadius: "50%",
+              background: TIER_COLORS[tier],
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "#ffffff",
+              fontWeight: 700,
+              fontSize: "20px",
+            }}
+          >
+            {tier}
+          </div>
+          <div>
+            <div style={{ fontSize: "14px", fontWeight: 700, color: "var(--slate)" }}>
+              {TIER_NAMES[tier]}
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+              {(getTierLTV(tier) * 100).toFixed(0)}% LTV
+            </div>
+          </div>
+        </div>
+      </div>
 
-      {/* ── SIDEBAR ── */}
-      <aside style={{ width: "220px", flexShrink: 0, background: "var(--deep)", borderRight: "1px solid rgba(8,145,178,0.1)", display: "flex", flexDirection: "column", position: "fixed", inset: "0 auto 0 0", zIndex: 50 }}>
-        <Link href="/" style={{ display: "flex", alignItems: "center", gap: "10px", padding: "22px 20px", textDecoration: "none", borderBottom: "1px solid rgba(8,145,178,0.1)" }}>
-          <div className="guard-emblem" style={{ width: "22px", height: "22px" } as React.CSSProperties} />
-          <span style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "16px", fontWeight: 600, letterSpacing: "0.15em", color: "var(--slate)", textTransform: "uppercase" }}>
-            C<span style={{ color: "var(--cyan)" }}>Guard</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: "12px" }}>
+        {[
+          { label: "UHF", value: unifiedHealthFactor.toFixed(2) },
+          { label: "Contagion", value: `${contagionScore}%` },
+          { label: "DSS", value: `${debtServiceabilityScore}%` },
+          { label: "Max LTV", value: `${(getTierLTV(tier) * 100).toFixed(0)}%` },
+        ].map(({ label, value }) => (
+          <div key={label} style={{ padding: "10px", background: "rgba(8,145,178,0.06)", borderRadius: "4px" }}>
+            <div style={{ color: "var(--muted)", marginBottom: "4px" }}>{label}</div>
+            <div style={{ fontWeight: 700, color: "var(--slate)" }}>{value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OVERVIEW TAB
+// ─────────────────────────────────────────────────────────────────────────────
+
+function OverviewTab({
+  positions,
+  creditScore,
+}: {
+  positions: ReturnType<typeof useUserPositions>;
+  creditScore: UserCreditScore;
+}) {
+  if (positions.loading) {
+    return (
+      <div style={{ padding: "32px", textAlign: "center", color: "var(--muted)" }}>
+        Fetching positions from Aave &amp; Morpho…
+      </div>
+    );
+  }
+
+  if (positions.positions.length === 0) {
+    return (
+      <div style={{ padding: "32px", textAlign: "center" }}>
+        <div style={{ fontSize: "32px", marginBottom: "12px" }}>🔍</div>
+        <div style={{ fontSize: "14px", color: "var(--slate2)", lineHeight: 1.8 }}>
+          No active positions found on Aave or Morpho (Sepolia).
+          <br />
+          <span style={{ fontSize: "12px", color: "var(--muted)" }}>
+            Deposit collateral to an external protocol — or use the Borrow tab to work with our lender directly.
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", padding: "20px" }}>
+      <div>
+        <h3
+          style={{
+            fontSize: "12px",
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            color: "var(--muted)",
+            marginBottom: "12px",
+          }}
+        >
+          Portfolio Summary
+        </h3>
+        <div style={{ display: "grid", gap: "8px" }}>
+          {[
+            { label: "Total Collateral (USD)", value: fmt$(positions.totalCollateralUSD) },
+            { label: "Total Debt (USD)", value: fmt$(positions.totalDebtUSD) },
+            {
+              label: "Unified Health Factor",
+              value: hfLabel(positions.unifiedHealthFactor),
+              color: hfColor(positions.unifiedHealthFactor),
+            },
+          ].map(({ label, value, color }) => (
+            <div key={label} style={CARD}>
+              <div style={{ color: "var(--muted)", marginBottom: "3px" }}>{label}</div>
+              <div
+                style={{
+                  fontWeight: 700,
+                  fontSize: "16px",
+                  color: color ?? "var(--slate)",
+                }}
+              >
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <h3
+          style={{
+            fontSize: "12px",
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            color: "var(--muted)",
+            marginBottom: "12px",
+          }}
+        >
+          Credit Assessment
+        </h3>
+        <CreditScoreCard score={creditScore} />
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POSITIONS TAB
+// ─────────────────────────────────────────────────────────────────────────────
+
+function PositionsTab({
+  positions,
+}: {
+  positions: ReturnType<typeof useUserPositions>;
+}) {
+  if (positions.loading) {
+    return <div style={{ padding: "24px", color: "var(--muted)" }}>Loading positions…</div>;
+  }
+
+  if (positions.positions.length === 0) {
+    return (
+      <div style={{ padding: "24px", textAlign: "center", color: "var(--muted)" }}>
+        No positions found on Aave or Morpho (Sepolia)
+      </div>
+    );
+  }
+
+  const headers = [
+    "Protocol",
+    "Chain",
+    "Collateral Asset",
+    "Collateral (USD)",
+    "Debt Asset",
+    "Debt (USD)",
+    "Health Factor",
+  ];
+
+  return (
+    <div style={{ padding: "16px", overflowX: "auto" }}>
+      <table style={{ width: "100%", fontSize: "12px", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid rgba(8,145,178,0.15)" }}>
+            {headers.map((h) => (
+              <th
+                key={h}
+                style={{
+                  padding: "8px",
+                  textAlign: "left",
+                  color: "var(--muted)",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  fontSize: "10px",
+                  letterSpacing: "0.08em",
+                }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {positions.positions.map((pos, i) => {
+            const hf = pos.debtUSD > 0 ? pos.collateralUSD / pos.debtUSD : 999;
+            return (
+              <tr key={i} style={{ borderBottom: "1px solid rgba(8,145,178,0.06)" }}>
+                <td style={{ padding: "12px 8px", textTransform: "capitalize", fontWeight: 500 }}>
+                  {pos.protocol}
+                </td>
+                <td style={{ padding: "12px 8px", textTransform: "capitalize" }}>{pos.chain}</td>
+                <td
+                  style={{
+                    padding: "12px 8px",
+                    fontFamily: "Space Mono,monospace",
+                    fontWeight: 600,
+                  }}
+                >
+                  {pos.collateralAsset}
+                </td>
+                <td style={{ padding: "12px 8px", color: "#10b981" }}>
+                  {fmt$(pos.collateralUSD)}
+                </td>
+                <td
+                  style={{
+                    padding: "12px 8px",
+                    fontFamily: "Space Mono,monospace",
+                    fontWeight: 600,
+                  }}
+                >
+                  {pos.debtAsset}
+                </td>
+                <td style={{ padding: "12px 8px", color: "#ef4444" }}>
+                  {fmt$(pos.debtUSD)}
+                </td>
+                <td
+                  style={{
+                    padding: "12px 8px",
+                    color: hfColor(hf),
+                    fontWeight: 700,
+                    fontFamily: "Space Mono,monospace",
+                  }}
+                >
+                  {hfLabel(hf)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ATTESTATION TAB
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AttestationTab({ attestation }: { attestation: ReturnType<typeof useAttestation> }) {
+  const { mutate: grantPermission } = useWriteContract();
+  const [isPending, setIsPending] = useState(false);
+  const [txError, setTxError] = useState<string | null>(null);
+
+  const handleGrant = () => {
+    setIsPending(true);
+    setTxError(null);
+    grantPermission(
+      { address: CONTRACTS.attestation, abi: ATTESTATION_ABI, functionName: "grantPermission" },
+      {
+        onSuccess: (hash) => {
+          setIsPending(false);
+          console.log("grantPermission tx:", hash);
+          setTimeout(() => attestation.refetch(), 3_000);
+        },
+        onError: (err) => {
+          setIsPending(false);
+          setTxError((err as Error).message ?? String(err));
+        },
+      },
+    );
+  };
+
+  if (attestation.isLoading) {
+    return (
+      <div style={{ padding: "24px", color: "var(--muted)" }}>
+        ⏳ Reading attestation from contract…
+      </div>
+    );
+  }
+
+  if (attestation.isError) {
+    return (
+      <div style={{ padding: "24px" }}>
+        <div
+          style={{
+            padding: "16px",
+            background: "rgba(239,68,68,0.08)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            borderRadius: "6px",
+            marginBottom: "16px",
+          }}
+        >
+          <div style={{ fontSize: "13px", color: "#ef4444", fontWeight: 600, marginBottom: "4px" }}>
+            ❌ Contract Read Error
+          </div>
+          <div style={{ fontSize: "12px", color: "var(--slate2)", lineHeight: 1.6 }}>
+            Could not read the attestation contract. Ensure you are on Sepolia.
+          </div>
+          <div
+            style={{
+              marginTop: "8px",
+              fontSize: "11px",
+              fontFamily: "Space Mono,monospace",
+              color: "var(--muted)",
+            }}
+          >
+            {CONTRACTS.attestation}
+          </div>
+        </div>
+        <a
+          href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ fontSize: "12px", color: "var(--cyan)" }}
+        >
+          View on Etherscan ↗
+        </a>
+        <button
+          onClick={() => attestation.refetch()}
+          style={{
+            marginLeft: "16px",
+            padding: "8px 16px",
+            background: "rgba(8,145,178,0.1)",
+            border: "1px solid var(--cyan)",
+            color: "var(--cyan)",
+            fontWeight: 600,
+            cursor: "pointer",
+            fontSize: "11px",
+            borderRadius: "4px",
+          }}
+        >
+          ↻ Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!attestation.isValid) {
+    return (
+      <div style={{ padding: "24px" }}>
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "16px",
+            background: "rgba(239,68,68,0.08)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            borderRadius: "6px",
+          }}
+        >
+          <div style={{ fontSize: "13px", color: "#ef4444", fontWeight: 600, marginBottom: "4px" }}>
+            No Active Attestation
+          </div>
+          <div style={{ fontSize: "12px", color: "var(--slate2)", lineHeight: 1.6 }}>
+            Your on-chain credit attestation doesn&apos;t exist or has expired. Grant permission so
+            the Chainlink CRE workflow can assess your credit and mint a tier attestation.
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginBottom: "16px",
+            padding: "12px",
+            background: "rgba(100,116,139,0.06)",
+            border: "1px solid rgba(100,116,139,0.12)",
+            borderRadius: "4px",
+            fontSize: "11px",
+            fontFamily: "Space Mono,monospace",
+            color: "var(--muted)",
+          }}
+        >
+          <div style={{ marginBottom: "4px", fontWeight: 600, color: "var(--slate2)" }}>
+            Debug
+          </div>
+          <div>Contract: {CONTRACTS.attestation}</div>
+          <div>isValid: false · tier: {attestation.tier} · expiry: {attestation.expiry.toString()}</div>
+          <a
+            href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--cyan)", textDecoration: "underline", display: "block", marginTop: "4px" }}
+          >
+            View contract ↗
+          </a>
+        </div>
+
+        {txError && (
+          <div
+            style={{
+              marginBottom: "12px",
+              padding: "12px",
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.2)",
+              borderRadius: "4px",
+              fontSize: "12px",
+              color: "#ef4444",
+              fontFamily: "Space Mono,monospace",
+              lineHeight: 1.4,
+              wordBreak: "break-all",
+            }}
+          >
+            {txError}
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <button
+            onClick={handleGrant}
+            disabled={isPending}
+            style={{
+              padding: "12px 20px",
+              background: isPending
+                ? "var(--muted)"
+                : "linear-gradient(135deg, var(--cyan), #06b6d4)",
+              border: "none",
+              color: "#ffffff",
+              fontWeight: 700,
+              cursor: isPending ? "wait" : "pointer",
+              fontSize: "12px",
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              borderRadius: "4px",
+            }}
+          >
+            {isPending ? "Sending transaction…" : "Grant Permission"}
+          </button>
+          <button
+            onClick={() => attestation.refetch()}
+            style={{
+              padding: "8px 16px",
+              background: "rgba(8,145,178,0.1)",
+              border: "1px solid rgba(8,145,178,0.25)",
+              color: "var(--cyan)",
+              fontWeight: 600,
+              cursor: "pointer",
+              fontSize: "11px",
+              textTransform: "uppercase",
+              borderRadius: "4px",
+            }}
+          >
+            ↻ Check Status
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const expiryDate = new Date(Number(attestation.expiry) * 1000);
+  const expired = Date.now() > expiryDate.getTime();
+
+  return (
+    <div style={{ padding: "24px" }}>
+      <div
+        style={{
+          padding: "24px",
+          background: expired
+            ? "rgba(239,68,68,0.08)"
+            : attestation.tier <= 2
+              ? "rgba(16,185,129,0.08)"
+              : "rgba(249,115,22,0.08)",
+          border: expired
+            ? "1px solid rgba(239,68,68,0.3)"
+            : attestation.tier <= 2
+              ? "1px solid rgba(16,185,129,0.3)"
+              : "1px solid rgba(249,115,22,0.3)",
+          borderRadius: "8px",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            width: "80px",
+            height: "80px",
+            borderRadius: "50%",
+            background: TIER_COLORS[attestation.tier],
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#ffffff",
+            fontWeight: 700,
+            fontSize: "36px",
+            margin: "0 auto 12px",
+          }}
+        >
+          {attestation.tier}
+        </div>
+        <div style={{ fontSize: "20px", fontWeight: 700, color: "var(--slate)", marginBottom: "4px" }}>
+          {TIER_NAMES[attestation.tier]}
+        </div>
+        <div style={{ fontSize: "13px", color: "var(--slate2)", marginBottom: "12px" }}>
+          Verified Credit Tier · {(getTierLTV(attestation.tier) * 100).toFixed(0)}% LTV
+        </div>
+        {expired && (
+          <div
+            style={{
+              marginBottom: "12px",
+              padding: "6px 12px",
+              background: "rgba(239,68,68,0.15)",
+              borderRadius: "4px",
+              fontSize: "11px",
+              color: "#ef4444",
+              fontWeight: 600,
+            }}
+          >
+            ⚠️ EXPIRED
+          </div>
+        )}
+        <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "16px" }}>
+          {expired ? "Expired" : "Expires"}: {expiryDate.toLocaleString()}
+        </div>
+        <a
+          href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ fontSize: "11px", color: "var(--cyan)", fontWeight: 600, textDecoration: "none" }}
+        >
+          View Contract on Etherscan →
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BORROW TAB — fully real on-chain data, zero mock values
+// ─────────────────────────────────────────────────────────────────────────────
+
+function BorrowTab({
+  loans,
+  ethPrice,
+}: {
+  loans: ReturnType<typeof useUserLoans>;
+  ethPrice: number;
+}) {
+  const loan = loans.loans[0] ?? null;
+
+  // State
+  const [depositAmt, setDepositAmt] = useState("");
+  const [borrowAmt, setBorrowAmt] = useState("");
+  const [repayAmt, setRepayAmt] = useState("");
+  const [withdrawAmt, setWithdrawAmt] = useState("");
+
+  // Hooks
+  const { deposit, isPending: depositPending, isSuccess: depositSuccess, error: depositError } =
+    useDepositCollateral();
+  const { repay, isPending: repayPending, isSuccess: repaySuccess, error: repayError } = useRepay();
+  const { withdraw, isPending: withdrawPending, isSuccess: withdrawSuccess, error: withdrawError } =
+    useWithdrawCollateral();
+  const { mutate: borrow } = useWriteContract();
+  const [borrowPending, setBorrowPending] = useState(false);
+  const [borrowError, setBorrowError] = useState<string | null>(null);
+  const [borrowSuccess, setBorrowSuccess] = useState(false);
+
+  // Derived
+  const collateralETH = loan?.collateralETH ?? 0;
+  const borrowedETH = loan?.borrowedAmount ?? 0;
+  const interestETH = loan?.interestAccrued ?? 0;
+  const healthFactor = loan?.healthFactor ?? 0;
+  const maxBorrowETH = loan?.maxBorrowETH ?? 0;
+  const availableETH = Math.max(0, maxBorrowETH - borrowedETH);
+  const repayTotal = borrowedETH + interestETH;
+
+  // Pre-fill repay amount when loan is loaded
+  useEffect(() => {
+    if (repayTotal > 0) {
+      setRepayAmt(repayTotal.toFixed(6));
+    }
+  }, [repayTotal]);
+
+  const handleBorrow = () => {
+    const amount = parseFloat(borrowAmt);
+    if (isNaN(amount) || amount <= 0) return;
+    if (amount > availableETH) {
+      setBorrowError(`Exceeds available credit (${availableETH.toFixed(4)} ETH)`);
+      return;
+    }
+    setBorrowError(null);
+    setBorrowSuccess(false);
+    setBorrowPending(true);
+    borrow(
+      {
+        address: CONTRACTS.lender,
+        abi: LENDER_ABI,
+        functionName: "borrow",
+        args: [parseEther(amount.toString())],
+      },
+      {
+        onSuccess: () => {
+          setBorrowAmount("");
+          setBorrowPending(false);
+          setBorrowSuccess(true);
+        },
+        onError: (err) => {
+          setBorrowPending(false);
+          setBorrowError((err as Error).message ?? "Borrow failed");
+        },
+      },
+    );
+  };
+
+  // Consolidate: avoid TS error from setBorrowAmount
+  function setBorrowAmount(v: string) {
+    setBorrowAmt(v);
+  }
+
+  const btnStyle = (active: boolean, danger = false): React.CSSProperties => ({
+    padding: "10px 16px",
+    background: !active
+      ? "var(--muted)"
+      : danger
+        ? "linear-gradient(135deg, #ef4444, #dc2626)"
+        : "linear-gradient(135deg, var(--cyan), #06b6d4)",
+    border: "none",
+    color: "#ffffff",
+    fontWeight: 700,
+    cursor: active ? "pointer" : "not-allowed",
+    fontSize: "12px",
+    textTransform: "uppercase",
+    borderRadius: "4px",
+    whiteSpace: "nowrap",
+    letterSpacing: "0.05em",
+  });
+
+  const sectionHead = (label: string, sub?: string) => (
+    <div style={{ marginBottom: "16px" }}>
+      <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--slate)" }}>{label}</div>
+      {sub && <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "2px" }}>{sub}</div>}
+    </div>
+  );
+
+  const inputStyle: React.CSSProperties = {
+    flex: 1,
+    padding: "10px 12px",
+    border: "1px solid rgba(8,145,178,0.2)",
+    background: "rgba(8,145,178,0.04)",
+    color: "var(--slate)",
+    fontFamily: "Space Mono,monospace",
+    fontSize: "12px",
+    borderRadius: "4px",
+    outline: "none",
+  };
+
+  const statusMsg = (
+    msg: string | null | undefined,
+    type: "success" | "error",
+  ) =>
+    msg ? (
+      <div
+        style={{
+          marginTop: "8px",
+          padding: "8px 12px",
+          background:
+            type === "success" ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)",
+          border: `1px solid ${type === "success" ? "rgba(16,185,129,0.25)" : "rgba(239,68,68,0.25)"}`,
+          borderRadius: "4px",
+          fontSize: "11px",
+          color: type === "success" ? "#10b981" : "#ef4444",
+          fontFamily: "Space Mono,monospace",
+          wordBreak: "break-all",
+        }}
+      >
+        {type === "success" ? "✓ " : "✗ "}{msg}
+      </div>
+    ) : null;
+
+  return (
+    <div style={{ padding: "24px", display: "grid", gap: "24px", maxWidth: "720px" }}>
+
+      {/* ── Stats row ── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }}>
+        {[
+          {
+            label: "Collateral",
+            value: fmtETH(collateralETH),
+            sub: ethPrice > 0 ? fmt$(collateralETH * ethPrice) : "—",
+            color: "var(--slate)",
+          },
+          {
+            label: "Borrowed",
+            value: fmtETH(borrowedETH),
+            sub: ethPrice > 0 ? fmt$(borrowedETH * ethPrice) : "—",
+            color: borrowedETH > 0 ? "#ef4444" : "var(--slate)",
+          },
+          {
+            label: "Health Factor",
+            value: hfLabel(healthFactor),
+            sub: healthFactor >= 999 ? "No debt" : healthFactor > 2 ? "Healthy" : healthFactor > 1.2 ? "Caution" : healthFactor > 0 ? "At risk" : "—",
+            color: hfColor(healthFactor),
+          },
+          {
+            label: "Available",
+            value: fmtETH(availableETH, 4),
+            sub: `Max ${fmtETH(maxBorrowETH, 4)}`,
+            color: "#10b981",
+          },
+        ].map(({ label, value, sub, color }) => (
+          <div key={label} style={{ ...CARD, padding: "14px" }}>
+            <div style={{ fontSize: "10px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "6px" }}>
+              {label}
+            </div>
+            <div style={{ fontWeight: 700, fontSize: "14px", color, fontFamily: "Space Mono,monospace" }}>
+              {value}
+            </div>
+            <div style={{ fontSize: "10px", color: "var(--slate2)", marginTop: "2px" }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {loans.loading && (
+        <div style={{ color: "var(--muted)", fontSize: "12px" }}>Loading position from contract…</div>
+      )}
+
+      {/* ── Step 1: Deposit Collateral ── */}
+      <div style={{ ...CARD, padding: "20px" }}>
+        {sectionHead("Step 1 — Deposit Collateral", "Send ETH to ConfidentialLender as collateral")}
+
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <input
+            type="number"
+            placeholder="0.05"
+            min="0.001"
+            step="0.001"
+            value={depositAmt}
+            onChange={(e) => setDepositAmt(e.target.value)}
+            title="Collateral amount in ETH"
+            style={inputStyle}
+          />
+          <span style={{ fontSize: "11px", color: "var(--muted)", whiteSpace: "nowrap" }}>ETH</span>
+          <button
+            onClick={() => deposit(parseFloat(depositAmt))}
+            disabled={depositPending || !depositAmt || parseFloat(depositAmt) <= 0}
+            style={btnStyle(!depositPending && !!depositAmt && parseFloat(depositAmt) > 0)}
+          >
+            {depositPending ? "Depositing…" : "Deposit"}
+          </button>
+        </div>
+
+        {depositAmt && ethPrice > 0 && (
+          <div style={{ marginTop: "6px", fontSize: "11px", color: "var(--muted)" }}>
+            ≈ {fmt$(parseFloat(depositAmt || "0") * ethPrice)} at current price
+          </div>
+        )}
+        {statusMsg(depositSuccess ? "Collateral deposited successfully" : null, "success")}
+        {statusMsg(depositError, "error")}
+      </div>
+
+      {/* ── Step 2: Borrow ── */}
+      <div style={{ ...CARD, padding: "20px" }}>
+        {sectionHead(
+          "Step 2 — Borrow ETH",
+          collateralETH === 0
+            ? "Deposit collateral first to unlock borrowing"
+            : `Available: ${availableETH.toFixed(4)} ETH based on your collateral & tier`,
+        )}
+
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          <input
+            type="number"
+            placeholder="0.01"
+            min="0.001"
+            step="0.001"
+            value={borrowAmt}
+            onChange={(e) => setBorrowAmt(e.target.value)}
+            disabled={collateralETH === 0 || availableETH === 0}
+            title="Borrow amount in ETH"
+            style={{ ...inputStyle, opacity: collateralETH === 0 ? 0.5 : 1 }}
+          />
+          <span style={{ fontSize: "11px", color: "var(--muted)", whiteSpace: "nowrap" }}>ETH</span>
+          <button
+            onClick={() => setBorrowAmt(availableETH.toFixed(4))}
+            disabled={availableETH === 0}
+            style={{
+              padding: "10px 12px",
+              background: "rgba(8,145,178,0.1)",
+              border: "1px solid rgba(8,145,178,0.25)",
+              color: "var(--cyan)",
+              fontWeight: 600,
+              cursor: "pointer",
+              fontSize: "11px",
+              borderRadius: "4px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Max
+          </button>
+          <button
+            onClick={handleBorrow}
+            disabled={
+              borrowPending ||
+              collateralETH === 0 ||
+              !borrowAmt ||
+              parseFloat(borrowAmt) <= 0 ||
+              parseFloat(borrowAmt) > availableETH
+            }
+            style={btnStyle(
+              !borrowPending &&
+                collateralETH > 0 &&
+                !!borrowAmt &&
+                parseFloat(borrowAmt) > 0 &&
+                parseFloat(borrowAmt) <= availableETH,
+            )}
+          >
+            {borrowPending ? "Borrowing…" : "Borrow"}
+          </button>
+        </div>
+
+        {borrowAmt && ethPrice > 0 && (
+          <div style={{ marginTop: "6px", fontSize: "11px", color: "var(--muted)" }}>
+            ≈ {fmt$(parseFloat(borrowAmt || "0") * ethPrice)} · Available: {fmtETH(availableETH, 4)}
+          </div>
+        )}
+        {statusMsg(borrowSuccess ? "Borrow transaction confirmed" : null, "success")}
+        {statusMsg(borrowError, "error")}
+      </div>
+
+      {/* ── Active Loan: Repay + Withdraw ── */}
+      {(borrowedETH > 0 || collateralETH > 0) && (
+        <div style={{ ...CARD, padding: "20px" }}>
+          {sectionHead("Manage Position")}
+
+          {borrowedETH > 0 && (
+            <div style={{ marginBottom: "20px" }}>
+              <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Repay Loan
+              </div>
+              <div style={{ fontSize: "12px", color: "var(--slate2)", marginBottom: "10px" }}>
+                Outstanding: {fmtETH(borrowedETH)} + {fmtETH(interestETH, 6)} interest
+                = <strong style={{ color: "var(--slate)" }}>{fmtETH(repayTotal, 6)}</strong>
+              </div>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <input
+                  type="number"
+                  placeholder={repayTotal.toFixed(6)}
+                  min="0"
+                  step="0.000001"
+                  value={repayAmt}
+                  onChange={(e) => setRepayAmt(e.target.value)}
+                  title="Repay amount in ETH"
+                  style={inputStyle}
+                />
+                <span style={{ fontSize: "11px", color: "var(--muted)", whiteSpace: "nowrap" }}>ETH</span>
+                <button
+                  onClick={() => repay(parseFloat(repayAmt))}
+                  disabled={repayPending || !repayAmt || parseFloat(repayAmt) <= 0}
+                  style={btnStyle(!repayPending && !!repayAmt && parseFloat(repayAmt) > 0)}
+                >
+                  {repayPending ? "Repaying…" : "Repay"}
+                </button>
+              </div>
+              {statusMsg(repaySuccess ? "Loan repaid successfully" : null, "success")}
+              {statusMsg(repayError, "error")}
+            </div>
+          )}
+
+          {collateralETH > 0 && (
+            <div>
+              <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "8px", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Withdraw Collateral
+              </div>
+              {borrowedETH > 0 && (
+                <div style={{ fontSize: "11px", color: "#f59e0b", marginBottom: "8px" }}>
+                  ⚠ Repay all debt before withdrawing collateral
+                </div>
+              )}
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <input
+                  type="number"
+                  placeholder={collateralETH.toFixed(4)}
+                  min="0.001"
+                  step="0.001"
+                  value={withdrawAmt}
+                  onChange={(e) => setWithdrawAmt(e.target.value)}
+                  disabled={borrowedETH > 0}
+                  title="Withdraw amount in ETH"
+                  style={{ ...inputStyle, opacity: borrowedETH > 0 ? 0.5 : 1 }}
+                />
+                <span style={{ fontSize: "11px", color: "var(--muted)", whiteSpace: "nowrap" }}>ETH</span>
+                <button
+                  onClick={() => setWithdrawAmt(collateralETH.toFixed(4))}
+                  disabled={borrowedETH > 0}
+                  style={{
+                    padding: "10px 12px",
+                    background: "rgba(8,145,178,0.1)",
+                    border: "1px solid rgba(8,145,178,0.25)",
+                    color: "var(--cyan)",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    fontSize: "11px",
+                    borderRadius: "4px",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  Max
+                </button>
+                <button
+                  onClick={() => withdraw(parseFloat(withdrawAmt))}
+                  disabled={
+                    withdrawPending ||
+                    borrowedETH > 0 ||
+                    !withdrawAmt ||
+                    parseFloat(withdrawAmt) <= 0
+                  }
+                  style={btnStyle(
+                    !withdrawPending &&
+                      borrowedETH === 0 &&
+                      !!withdrawAmt &&
+                      parseFloat(withdrawAmt) > 0,
+                    true,
+                  )}
+                >
+                  {withdrawPending ? "Withdrawing…" : "Withdraw"}
+                </button>
+              </div>
+              {statusMsg(withdrawSuccess ? "Collateral withdrawn" : null, "success")}
+              {statusMsg(withdrawError, "error")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Loan details ── */}
+      {loan && (
+        <div style={{ ...CARD, padding: "16px" }}>
+          <div style={{ fontSize: "11px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "12px" }}>
+            Position Details · ConfidentialLender
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px", fontSize: "12px" }}>
+            {[
+              { label: "Tier", value: TIER_NAMES[loan.tier] ?? `T${loan.tier}`, color: TIER_COLORS[loan.tier] },
+              { label: "Collateral", value: fmtETH(loan.collateralETH) },
+              { label: "Borrowed", value: fmtETH(loan.borrowedAmount) },
+              { label: "Interest", value: fmtETH(loan.interestAccrued, 6) },
+              { label: "Health Factor", value: hfLabel(loan.healthFactor), color: hfColor(loan.healthFactor) },
+              { label: "Max Borrow", value: fmtETH(loan.maxBorrowETH) },
+            ].map(({ label, value, color }) => (
+              <div key={label}>
+                <div style={{ color: "var(--muted)", marginBottom: "2px" }}>{label}</div>
+                <div style={{ fontWeight: 700, color: color ?? "var(--slate)", fontFamily: "Space Mono,monospace" }}>
+                  {value}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: "12px", fontSize: "11px", color: "var(--muted)" }}>
+            Contract:{" "}
+            <a
+              href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.lender}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: "var(--cyan)" }}
+            >
+              {CONTRACTS.lender}
+            </a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN DASHBOARD
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function Dashboard() {
+  const { address, isConnected } = useAccount();
+  const [tab, setTab] = useState<Tab>("overview");
+  const [isMounted, setIsMounted] = useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  const ethPrice = useLiveETHPrice();
+  const positions = useUserPositions();
+  const creditScore = useUserCreditScore(positions.positions);
+  const loans = useUserLoans(ethPrice);
+  const attestation = useAttestation();
+
+  if (!isMounted) return null;
+
+  if (!isConnected) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--void)",
+        }}
+      >
+        <div style={{ textAlign: "center", padding: "24px" }}>
+          <div style={{ fontSize: "48px", marginBottom: "16px" }}>🔐</div>
+          <h1
+            style={{
+              fontSize: "24px",
+              fontWeight: 700,
+              color: "var(--slate)",
+              marginBottom: "8px",
+            }}
+          >
+            Connect Your Wallet
+          </h1>
+          <p style={{ fontSize: "14px", color: "var(--slate2)", marginBottom: "24px" }}>
+            Sign in with MetaMask on Sepolia to access your credit dashboard.
+          </p>
+          <WalletSection />
+        </div>
+      </div>
+    );
+  }
+
+  const tabs: Tab[] = ["overview", "positions", "attestation", "borrow", "settings"];
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--void)" }}>
+      {/* Header */}
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 50,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "14px 32px",
+          borderBottom: "1px solid rgba(8,145,178,0.08)",
+          background: "rgba(248,248,252,0.94)",
+          backdropFilter: "blur(16px)",
+        }}
+      >
+        <Link href="/" style={{ display: "flex", alignItems: "center", textDecoration: "none" }}>
+          <span
+            style={{
+              fontFamily: "'Cormorant Garamond',serif",
+              fontSize: "16px",
+              fontWeight: 600,
+              letterSpacing: "0.1em",
+              color: "var(--slate)",
+            }}
+          >
+            Confidential<span style={{ color: "var(--cyan)" }}>Guard</span>
           </span>
         </Link>
 
-        <WalletSection />
+        <PriceTicker />
 
-        {/* Live attestation badge */}
-        {isConnected && (
-          <div style={{ padding: "10px 16px", borderBottom: "1px solid rgba(8,145,178,0.08)" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "10px", color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>CREDIT TIER</span>
-              {isAttested
-                ? <span style={{ fontSize: "9px", fontWeight: 700, padding: "2px 6px", background: "rgba(16,185,129,0.1)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)", fontFamily: "Space Mono,monospace" }}>LIVE</span>
-                : <span style={{ fontSize: "9px", fontWeight: 700, padding: "2px 6px", background: "rgba(245,158,11,0.1)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.2)", fontFamily: "Space Mono,monospace" }}>PENDING</span>
-              }
-            </div>
-            {isAttested && tier
-              ? <div style={{ marginTop: "4px", fontSize: "12px", fontWeight: 700, color: tierColor, fontFamily: "Space Mono,monospace" }}>T{tier} · {tierName}</div>
-              : <div style={{ marginTop: "4px", fontSize: "10px", color: "var(--muted)" }}>Grant permission to start</div>
-            }
-          </div>
-        )}
-
-        <nav style={{ flex: 1, padding: "10px 0" }}>
-          <NavItem t="overview" icon="◈" label="Overview" />
-          <NavItem t="borrow"   icon="⬡" label="Borrow" />
-          <NavItem t="position" icon="◎" label="My Position" />
-          <NavItem t="verify"   icon="◇" label="Verify Wallet" />
-          <NavItem t="settings" icon="≡" label="Settings" />
-        </nav>
-
-        <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(8,145,178,0.08)" }}>
-          {[
-            { label: "CRE Guardian",   color: "#10b981" },
-            { label: "CCIP Bridge",    color: "#10b981" },
-            { label: "ACE Compliance", color: "#10b981" },
-          ].map(s => (
-            <div key={s.label} style={{ display: "flex", alignItems: "center", gap: "7px", marginBottom: "5px", fontSize: "10px", color: s.color }}>
-              <div style={{ width: "5px", height: "5px", borderRadius: "50%", background: s.color, flexShrink: 0 }} className="pulse-cyan" />
-              {s.label}
-            </div>
-          ))}
-          <div style={{ fontSize: "9px", color: "var(--muted)", marginTop: "4px", fontFamily: "Space Mono,monospace" }}>Sepolia Testnet</div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            fontFamily: "Space Mono,monospace",
+            fontSize: "11px",
+          }}
+        >
+          <span style={{ color: "var(--muted)" }}>{shortAddr(address!)}</span>
+          <div
+            style={{
+              width: "6px",
+              height: "6px",
+              borderRadius: "50%",
+              background: "#10b981",
+            }}
+            className="pulse-cyan"
+          />
         </div>
-      </aside>
+      </div>
 
-      {/* ── MAIN ── */}
-      <div style={{ marginLeft: "220px", flex: 1, display: "flex", flexDirection: "column" }}>
-
-        {/* Topbar */}
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 32px", borderBottom: "1px solid rgba(8,145,178,0.1)", background: "rgba(248,248,252,0.94)", backdropFilter: "blur(14px)", position: "sticky", top: 0, zIndex: 40 }}>
-          <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "22px", fontWeight: 400 }}>
-            {tab === "overview" && <><em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Credit</em> Overview</>}
-            {tab === "borrow"   && <>Borrow <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Capital</em></>}
-            {tab === "position" && <>My <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Position</em></>}
-            {tab === "verify"   && <>Verify <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Wallet</em></>}
-            {tab === "settings" && <><em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Account</em> Settings</>}
+      {/* Body */}
+      <div style={{ paddingTop: "72px", display: "flex", minHeight: "calc(100vh - 72px)" }}>
+        {/* Sidebar */}
+        <div
+          style={{
+            width: "220px",
+            borderRight: "1px solid rgba(8,145,178,0.08)",
+            background: "#fafbfc",
+            display: "flex",
+            flexDirection: "column",
+            flexShrink: 0,
+          }}
+        >
+          <WalletSection />
+          <div style={{ flex: 1, overflow: "auto", padding: "12px" }}>
+            {tabs.map((t) => (
+              <button
+                type="button"
+                key={t}
+                onClick={() => setTab(t)}
+                style={{
+                  width: "100%",
+                  padding: "10px 14px",
+                  marginBottom: "2px",
+                  border: "none",
+                  background:
+                    tab === t
+                      ? "linear-gradient(135deg, rgba(8,145,178,0.12), rgba(8,145,178,0.06))"
+                      : "transparent",
+                  borderLeft: tab === t ? "3px solid var(--cyan)" : "3px solid transparent",
+                  color: tab === t ? "var(--cyan)" : "var(--slate2)",
+                  fontWeight: tab === t ? 700 : 500,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  fontSize: "12px",
+                  textTransform: "capitalize",
+                  transition: "all .15s",
+                  borderRadius: "0 4px 4px 0",
+                }}
+              >
+                {t}
+              </button>
+            ))}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
-            <PriceTicker />
-            {isAttested && tier && (
-              <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "6px 14px", background: "var(--card)", border: `1px solid ${tierColor}33` }}>
-                <div style={{ fontSize: "10px", color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>TIER</div>
-                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "22px", fontWeight: 600, color: tierColor, lineHeight: 1 }}>{tier}</div>
-                <div style={{ padding: "2px 7px", background: `${tierColor}20`, fontSize: "9px", fontWeight: 700, color: tierColor, fontFamily: "Space Mono,monospace" }}>{tierName.toUpperCase()}</div>
+        </div>
+
+        {/* Content */}
+        <div style={{ flex: 1, overflow: "auto" }}>
+          <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
+            {tab === "overview" && (
+              <OverviewTab positions={positions} creditScore={creditScore} />
+            )}
+            {tab === "positions" && <PositionsTab positions={positions} />}
+            {tab === "attestation" && <AttestationTab attestation={attestation} />}
+            {tab === "borrow" && <BorrowTab loans={loans} ethPrice={ethPrice} />}
+            {tab === "settings" && (
+              <div style={{ padding: "24px", color: "var(--slate2)", fontSize: "13px" }}>
+                Settings coming soon
               </div>
             )}
-            <button type="button" onClick={() => { refetchAttest(); refetchPosition(); refetchPool(); }} className="btn-cyan"
-              style={{ padding: "8px 18px", fontSize: "10px", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}>
-              Refresh
-            </button>
           </div>
-        </header>
-
-        {/* Notifications */}
-        {txMsg && (
-          <div style={{ margin: "16px 32px 0", padding: "12px 16px", background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.25)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "13px", color: "#059669" }}>
-            <span>✓ {txMsg}</span>
-            <button type="button" onClick={() => setTxMsg(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: "16px" }}>×</button>
-          </div>
-        )}
-        {txErr && (
-          <div style={{ margin: "16px 32px 0", padding: "12px 16px", background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.25)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "13px", color: "#dc2626" }}>
-            <span>✕ {txErr}</span>
-            <button type="button" onClick={() => setTxErr(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: "16px" }}>×</button>
-          </div>
-        )}
-
-        {/* CRE banner */}
-        <div style={{ padding: "10px 32px", background: "rgba(245,158,11,0.06)", borderBottom: "1px solid rgba(245,158,11,0.2)", fontSize: "11px", color: "#92400e", fontFamily: "Space Mono,monospace" }}>
-          ⚠ <strong>CRE workflow pending Chainlink early-access.</strong> Attestation tier, loan positions, and contract reads are all live on Sepolia. Cross-chain DeFi positions will populate when TEE workflow deploys.
-        </div>
-
-        {/* ── CONTENT ── */}
-        <div style={{ padding: "28px 32px", flex: 1 }}>
-
-          {/* ════ OVERVIEW ════ */}
-          {tab === "overview" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "22px" }}>
-
-              {!isConnected && (
-                <div style={{ padding: "32px", background: "rgba(8,145,178,0.05)", border: "1px solid rgba(8,145,178,0.2)", textAlign: "center" }}>
-                  <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "28px", marginBottom: "10px" }}>Connect your wallet to begin</div>
-                  <div style={{ fontSize: "13px", color: "var(--muted)" }}>MetaMask on Sepolia Testnet required</div>
-                </div>
-              )}
-
-              {/* KPI row */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "14px" }}>
-                {[
-                  { label: "Credit Tier",     value: isAttested && tier ? `Tier ${tier}` : "—",  sub: isAttested ? `${tierName} · ${tierRate} APR` : isConnected ? "Get assessed below" : "Connect wallet",          color: tierColor },
-                  { label: "Attestation",     value: isAttested ? expiry.label : "—",             sub: isAttested ? "On-chain · 24h cycle" : "Grant permission to start",                                             color: "var(--cyan)" },
-                  { label: "My Collateral",   value: hasCollateral ? `${Number(formatEther(posCollateral!)).toFixed(4)} ETH` : "—", sub: hasCollateral ? "Deposited in ConfidentialLender" : "No position yet",      color: "#10b981" },
-                  { label: "My Loan",         value: hasLoan ? `${Number(formatEther(posBorrowed!)).toFixed(4)} ETH` : "—",         sub: hasLoan ? `+ ${Number(formatEther(posInterest ?? 0n)).toFixed(6)} interest` : "No active loan", color: hasLoan ? "#f59e0b" : "var(--muted)" },
-                ].map(s => (
-                  <div key={s.label} style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "18px 20px" }}>
-                    <div style={{ fontSize: "10px", fontWeight: 600, letterSpacing: "0.2em", textTransform: "uppercase", color: "var(--muted)", marginBottom: "10px", fontFamily: "Space Mono,monospace" }}>{s.label}</div>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "28px", fontWeight: 500, color: s.color, lineHeight: 1, marginBottom: "5px" }}>{s.value}</div>
-                    <div style={{ fontSize: "11px", color: "var(--muted)", fontWeight: 300 }}>{s.sub}</div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Assess My Credit */}
-              {isConnected && (
-                <div style={{ background: "var(--card)", border: `1px solid ${isAttested ? "rgba(8,145,178,0.25)" : "rgba(8,145,178,0.15)"}`, padding: "24px 28px" }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "32px" }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "22px", marginBottom: "8px" }}>
-                        {isAttested ? <>Your <em style={{ color: tierColor, fontStyle: "italic" }}>Credit Score</em></> : <>Assess My <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Credit</em></>}
-                      </div>
-                      {isAttested && tier ? (
-                        <>
-                          <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "12px" }}>
-                            <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "80px", fontWeight: 300, color: tierColor, lineHeight: 1 }}>{tier}</div>
-                            <div>
-                              <div style={{ fontSize: "16px", fontWeight: 700, color: tierColor, fontFamily: "Space Mono,monospace" }}>{tierName.toUpperCase()}</div>
-                              <div style={{ fontSize: "12px", color: "var(--muted)", marginTop: "4px" }}>Undercollateralized credit rate: <strong style={{ color: tierColor }}>{tierRate} APR</strong></div>
-                              <div style={{ fontSize: "11px", color: "var(--muted)", marginTop: "4px" }}>Expires in: <strong style={{ color: "var(--cyan)", fontFamily: "Space Mono,monospace" }}>{expiry.label}</strong></div>
-                            </div>
-                          </div>
-                          <div style={{ height: "3px", background: "rgba(0,0,0,0.08)", borderRadius: "2px", marginBottom: "12px" }}>
-                            <div style={{ height: "100%", width: `${expiry.pct}%`, background: `linear-gradient(90deg,var(--cyan-dim),${tierColor})`, borderRadius: "2px" }} />
-                          </div>
-                          <div style={{ fontSize: "11px", color: "var(--muted)", lineHeight: 1.8 }}>
-                            Score computed by Chainlink TEE: aggregated DeFi positions on Aave / Morpho / Compound + TradFi (Plaid) — all inside the secure enclave. Only your tier number is on-chain.
-                          </div>
-                        </>
-                      ) : hasPerm ? (
-                        <div>
-                          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
-                            <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#f59e0b" }} className="pulse-cyan" />
-                            <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--slate)" }}>Assessment In Progress</span>
-                          </div>
-                          <div style={{ fontSize: "12px", color: "var(--muted)", lineHeight: 1.8 }}>
-                            Permission granted. The Chainlink TEE is querying your Aave, Morpho, Compound, and Plaid positions privately inside the secure enclave. Your attestation will be minted on-chain within the next 5-minute cron cycle.
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <div style={{ fontSize: "12px", color: "var(--muted)", lineHeight: 1.8, marginBottom: "16px" }}>
-                            Grant permission to let the Chainlink TEE privately read your cross-chain DeFi positions and TradFi bank data. No raw data ever leaves the secure enclave. Only your credit tier (1–5) is written on-chain.
-                          </div>
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "10px", marginBottom: "18px" }}>
-                            {[
-                              { n: "1", t: "TEE reads positions", b: "Aave · Morpho · Compound · Plaid queried inside Intel SGX enclave" },
-                              { n: "2", t: "Score computed privately", b: "UHF + Contagion Risk + Debt Serviceability → Tier 1–5" },
-                              { n: "3", t: "Attestation minted", b: "Only the tier number is written on-chain. No financial data exposed" },
-                            ].map(s => (
-                              <div key={s.n} style={{ padding: "14px", background: "var(--deep)", border: "1px solid rgba(8,145,178,0.08)" }}>
-                                <div style={{ fontSize: "10px", fontWeight: 700, color: "var(--cyan)", fontFamily: "Space Mono,monospace", marginBottom: "6px" }}>0{s.n}</div>
-                                <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--slate)", marginBottom: "4px" }}>{s.t}</div>
-                                <div style={{ fontSize: "10px", color: "var(--muted)", lineHeight: 1.6 }}>{s.b}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Action column */}
-                    <div style={{ width: "200px", flexShrink: 0, display: "flex", flexDirection: "column", gap: "10px" }}>
-                      {isAttested ? (
-                        <>
-                          <button type="button" onClick={() => setTab("borrow")} className="btn-cyan"
-                            style={{ width: "100%", justifyContent: "center", padding: "12px", fontSize: "11px", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}>
-                            Borrow Capital →
-                          </button>
-                          <button type="button" onClick={() => setTab("position")}
-                            style={{ width: "100%", padding: "10px", background: "transparent", color: "var(--cyan)", border: "1px solid rgba(8,145,178,0.3)", fontSize: "10px", fontWeight: 700, cursor: "pointer", fontFamily: "Space Mono,monospace", letterSpacing: "0.1em" }}>
-                            View Position →
-                          </button>
-                          <a href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`} target="_blank" rel="noreferrer"
-                            style={{ display: "block", textAlign: "center", fontSize: "9px", color: "var(--muted)", fontFamily: "Space Mono,monospace", textDecoration: "none", marginTop: "4px" }}>
-                            View on Etherscan ↗
-                          </a>
-                        </>
-                      ) : hasPerm ? (
-                        <button type="button" disabled
-                          style={{ width: "100%", padding: "12px", background: "rgba(245,158,11,0.08)", color: "#f59e0b", border: "1px solid rgba(245,158,11,0.3)", fontSize: "10px", fontWeight: 700, fontFamily: "Space Mono,monospace", cursor: "not-allowed" }}>
-                          Scoring…
-                        </button>
-                      ) : (
-                        <>
-                          <button type="button"
-                            onClick={() => grantPerm({ address: CONTRACTS.attestation, abi: ATTESTATION_ABI, functionName: "grantPermission" })}
-                            disabled={isGranting || grantPending}
-                            className="btn-cyan"
-                            style={{ width: "100%", justifyContent: "center", padding: "12px", fontSize: "11px", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}>
-                            {isGranting || grantPending ? "Confirming…" : "Assess My Credit →"}
-                          </button>
-                          {grantHash && (
-                            <a href={`${SEPOLIA_EXPLORER}/tx/${grantHash}`} target="_blank" rel="noreferrer"
-                              style={{ fontSize: "9px", color: "var(--cyan)", textAlign: "center", display: "block", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                              Tx: {shortAddr(grantHash)} ↗
-                            </a>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Deployed contracts */}
-              <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "16px 20px" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
-                  <div style={{ fontSize: "10px", fontWeight: 600, letterSpacing: "0.2em", textTransform: "uppercase", color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>Deployed Contracts · Sepolia</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "9px", color: "#10b981", fontFamily: "Space Mono,monospace" }}>
-                    <div style={{ width: "5px", height: "5px", borderRadius: "50%", background: "#10b981" }} className="pulse-cyan" />
-                    Live on-chain
-                  </div>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "10px" }}>
-                  {[
-                    { name: "ConfidentialGuardAttestation", addr: CONTRACTS.attestation, extra: attestOwner ? `owner: ${shortAddr(attestOwner)}` : "…" },
-                    { name: "ConfidentialLender",           addr: CONTRACTS.lender,      extra: `supply: ${nftSupply !== undefined ? nftSupply.toString() : "…"} NFTs` },
-                    { name: "CCIP Receiver · Base Sepolia", addr: CONTRACTS.ccipReceiver, extra: "Base Sepolia chain" },
-                  ].map(c => (
-                    <a key={c.addr} href={`${SEPOLIA_EXPLORER}/address/${c.addr}`} target="_blank" rel="noreferrer"
-                      style={{ textDecoration: "none", padding: "10px 14px", background: "var(--deep)", border: "1px solid rgba(8,145,178,0.08)", transition: "border-color .2s" }}
-                      onMouseEnter={e => (e.currentTarget as HTMLElement).style.borderColor = "rgba(8,145,178,0.3)"}
-                      onMouseLeave={e => (e.currentTarget as HTMLElement).style.borderColor = "rgba(8,145,178,0.08)"}
-                    >
-                      <div style={{ fontSize: "9px", color: "var(--muted)", fontFamily: "Space Mono,monospace", marginBottom: "3px" }}>{c.name}</div>
-                      <div style={{ fontSize: "10px", color: "var(--cyan)", fontFamily: "Space Mono,monospace" }}>{shortAddr(c.addr)} ↗</div>
-                      <div style={{ fontSize: "9px", color: "var(--muted)", fontFamily: "Space Mono,monospace", marginTop: "4px" }}>{c.extra}</div>
-                    </a>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ════ BORROW ════ */}
-          {tab === "borrow" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-
-              {/* Pool stats (real on-chain) */}
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "14px" }}>
-                {[
-                  { label: "Pool Liquidity", value: poolLiquidity ? `${Number(formatEther(poolLiquidity)).toFixed(3)} ETH` : "Loading…", color: "var(--slate)" },
-                  { label: "Available",      value: poolAvailable ? `${Number(formatEther(poolAvailable)).toFixed(3)} ETH` : "Loading…", color: "#10b981" },
-                  { label: "Utilization",    value: poolUtil ? `${(Number(poolUtil) / 100).toFixed(1)}%` : "Loading…",                  color: "var(--cyan)" },
-                  { label: "Your Max Borrow",value: maxBorrowWei ? `${Number(formatEther(maxBorrowWei)).toFixed(4)} ETH` : isAttested ? "—" : "Needs attestation", color: isAttested ? "#10b981" : "var(--muted)" },
-                ].map(s => (
-                  <div key={s.label} style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "18px 20px" }}>
-                    <div style={{ fontSize: "10px", fontWeight: 600, letterSpacing: "0.2em", textTransform: "uppercase", color: "var(--muted)", marginBottom: "8px", fontFamily: "Space Mono,monospace" }}>{s.label}</div>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "28px", fontWeight: 500, color: s.color, lineHeight: 1 }}>{s.value}</div>
-                  </div>
-                ))}
-              </div>
-
-              {!isConnected && (
-                <div style={{ padding: "20px", background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)", textAlign: "center", color: "#d97706", fontSize: "13px" }}>
-                  Connect MetaMask to access the lending pool.
-                </div>
-              )}
-
-              {isConnected && !isAttested && (
-                <div style={{ padding: "20px", background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.2)" }}>
-                  <div style={{ fontSize: "13px", fontWeight: 600, color: "#dc2626", marginBottom: "6px" }}>Attestation Required</div>
-                  <div style={{ fontSize: "12px", color: "var(--slate2)", marginBottom: "12px" }}>You need a valid credit attestation before borrowing. The TEE will score your cross-chain positions and issue your tier on-chain.</div>
-                  <button type="button" onClick={() => setTab("overview")} className="btn-cyan"
-                    style={{ padding: "10px 20px", fontSize: "10px", clipPath: "polygon(6px 0%,100% 0%,calc(100% - 6px) 100%,0% 100%)" }}>
-                    Get Assessed →
-                  </button>
-                </div>
-              )}
-
-              {isConnected && isAttested && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-
-                  {/* Deposit Collateral */}
-                  <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.18)", padding: "24px" }}>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "20px", marginBottom: "6px" }}>
-                      Step 1 — Deposit <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Collateral</em>
-                    </div>
-                    <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "18px", fontFamily: "Space Mono,monospace" }}>
-                      Deposit ETH as collateral. Tier {tier} allows {tier === 1 ? "90%" : tier === 2 ? "80%" : tier === 3 ? "70%" : "60%"} LTV.
-                    </div>
-                    {hasCollateral && (
-                      <div style={{ padding: "10px 14px", background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.2)", marginBottom: "14px", fontSize: "11px", color: "#059669", fontFamily: "Space Mono,monospace" }}>
-                        Current collateral: {Number(formatEther(posCollateral!)).toFixed(4)} ETH
-                      </div>
-                    )}
-                    <label style={{ fontSize: "9px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: "7px", fontFamily: "Space Mono,monospace" }}>Amount (ETH)</label>
-                    <input type="number" value={collateralInput} onChange={e => setCollateralInput(e.target.value)} min="0.001" step="0.01" className="guard-input" style={{ marginBottom: "14px" }} />
-                    <button type="button" className="btn-cyan"
-                      style={{ width: "100%", justifyContent: "center", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}
-                      disabled={isDepositing || depositPending}
-                      onClick={() => doDeposit({ address: CONTRACTS.lender, abi: LENDER_ABI, functionName: "depositCollateral", value: parseEther(collateralInput || "0") })}>
-                      {isDepositing || depositPending ? "Confirming…" : "Deposit Collateral →"}
-                    </button>
-                    {depositHash && (
-                      <a href={`${SEPOLIA_EXPLORER}/tx/${depositHash}`} target="_blank" rel="noreferrer"
-                        style={{ display: "block", marginTop: "8px", fontSize: "9px", color: "var(--cyan)", textAlign: "center", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                        Tx: {shortAddr(depositHash)} ↗
-                      </a>
-                    )}
-                  </div>
-
-                  {/* Borrow */}
-                  <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.18)", padding: "24px" }}>
-                    <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "20px", marginBottom: "6px" }}>
-                      Step 2 — <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Borrow</em>
-                    </div>
-                    <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "18px", fontFamily: "Space Mono,monospace" }}>
-                      Your Tier {tier} attestation ({tierName}) unlocks {tierRate} APR. Max borrow: {maxBorrowWei ? `${Number(formatEther(maxBorrowWei)).toFixed(4)} ETH` : "—"}.
-                    </div>
-                    {hasLoan && (
-                      <div style={{ padding: "10px 14px", background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)", marginBottom: "14px", fontSize: "11px", color: "#d97706", fontFamily: "Space Mono,monospace" }}>
-                        Active loan: {Number(formatEther(posBorrowed!)).toFixed(4)} ETH principal
-                      </div>
-                    )}
-                    <label style={{ fontSize: "9px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: "7px", fontFamily: "Space Mono,monospace" }}>Amount (ETH)</label>
-                    <input type="number" value={borrowInput} onChange={e => setBorrowInput(e.target.value)} min="0.001" step="0.01" className="guard-input" style={{ marginBottom: "14px" }} />
-                    <button type="button" className="btn-cyan"
-                      style={{ width: "100%", justifyContent: "center", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}
-                      disabled={isBorrowing || borrowPending || !hasCollateral}
-                      onClick={() => {
-                        setTxErr(null);
-                        doBorrow({ address: CONTRACTS.lender, abi: LENDER_ABI, functionName: "borrow", args: [parseEther(borrowInput || "0")] });
-                      }}>
-                      {isBorrowing || borrowPending ? "Confirming…" : !hasCollateral ? "Deposit Collateral First" : "Borrow →"}
-                    </button>
-                    {borrowHash && (
-                      <a href={`${SEPOLIA_EXPLORER}/tx/${borrowHash}`} target="_blank" rel="noreferrer"
-                        style={{ display: "block", marginTop: "8px", fontSize: "9px", color: "var(--cyan)", textAlign: "center", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                        Tx: {shortAddr(borrowHash)} ↗
-                      </a>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ════ MY POSITION ════ */}
-          {tab === "position" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-
-              {!isConnected && (
-                <div style={{ padding: "20px", background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)", textAlign: "center", color: "#d97706" }}>Connect wallet to view your position.</div>
-              )}
-
-              {isConnected && !hasCollateral && !hasLoan && (
-                <div style={{ padding: "32px", background: "rgba(8,145,178,0.04)", border: "1px solid rgba(8,145,178,0.15)", textAlign: "center" }}>
-                  <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "22px", marginBottom: "10px" }}>No active position</div>
-                  <div style={{ fontSize: "12px", color: "var(--muted)", marginBottom: "16px" }}>{isAttested ? "You have a valid attestation. Deposit collateral to start borrowing." : "Get your credit assessed first, then deposit collateral."}</div>
-                  <button type="button" onClick={() => setTab(isAttested ? "borrow" : "overview")} className="btn-cyan"
-                    style={{ padding: "10px 24px", fontSize: "10px", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}>
-                    {isAttested ? "Go to Borrow →" : "Get Assessed →"}
-                  </button>
-                </div>
-              )}
-
-              {isConnected && (hasCollateral || hasLoan) && (
-                <>
-                  {/* Real position stats */}
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: "12px" }}>
-                    {[
-                      { label: "Collateral",    value: posCollateral ? `${Number(formatEther(posCollateral)).toFixed(4)} ETH` : "—",  color: "#10b981" },
-                      { label: "Borrowed",      value: posBorrowed   ? `${Number(formatEther(posBorrowed)).toFixed(4)} ETH`   : "—",  color: "#f59e0b" },
-                      { label: "Interest",      value: posInterest   ? `${Number(formatEther(posInterest)).toFixed(6)} ETH`   : "—",  color: "var(--muted)" },
-                      { label: "Health Factor", value: hfFromBps(posHF),                                                              color: hfColor(posHF ? Number(posHF) / 10000 : 999) },
-                      { label: "Borrow Tier",   value: posTier ? `Tier ${posTier}` : "—",                                            color: posTier ? TIER_COLORS[posTier] : "var(--muted)" },
-                    ].map(s => (
-                      <div key={s.label} style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "16px 18px", textAlign: "center" }}>
-                        <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "26px", fontWeight: 500, color: s.color, lineHeight: 1, marginBottom: "6px" }}>{s.value}</div>
-                        <div style={{ fontSize: "10px", color: "var(--muted)", fontFamily: "Space Mono,monospace", textTransform: "uppercase", letterSpacing: "0.12em" }}>{s.label}</div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
-
-                    {/* Repay */}
-                    {hasLoan && (
-                      <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "24px" }}>
-                        <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "20px", marginBottom: "14px" }}>
-                          <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Repay</em> Loan
-                        </div>
-                        <div style={{ padding: "12px 14px", background: "var(--deep)", border: "1px solid rgba(8,145,178,0.1)", marginBottom: "16px" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "5px" }}>
-                            <span style={{ color: "var(--muted)" }}>Principal</span>
-                            <span style={{ fontFamily: "Space Mono,monospace", color: "var(--slate)" }}>{posBorrowed ? Number(formatEther(posBorrowed)).toFixed(6) : "—"} ETH</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", marginBottom: "5px" }}>
-                            <span style={{ color: "var(--muted)" }}>Accrued Interest</span>
-                            <span style={{ fontFamily: "Space Mono,monospace", color: "#f59e0b" }}>{posInterest ? Number(formatEther(posInterest)).toFixed(6) : "0"} ETH</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "12px", borderTop: "1px solid rgba(8,145,178,0.1)", paddingTop: "6px", marginTop: "6px" }}>
-                            <span style={{ fontWeight: 600, color: "var(--slate)" }}>Total Owed</span>
-                            <span style={{ fontFamily: "Space Mono,monospace", fontWeight: 700, color: "var(--cyan)" }}>
-                              {posBorrowed && posInterest ? Number(formatEther(posBorrowed + posInterest)).toFixed(6) : "—"} ETH
-                            </span>
-                          </div>
-                        </div>
-                        <button type="button" className="btn-cyan"
-                          style={{ width: "100%", justifyContent: "center", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}
-                          disabled={isRepaying || repayPending}
-                          onClick={() => doRepay({
-                            address: CONTRACTS.lender,
-                            abi: LENDER_ABI,
-                            functionName: "repay",
-                            value: posBorrowed && posInterest ? posBorrowed + posInterest + parseEther("0.0001") : 0n,
-                          })}>
-                          {isRepaying || repayPending ? "Repaying…" : "Repay Full Loan →"}
-                        </button>
-                        {repayHash && (
-                          <a href={`${SEPOLIA_EXPLORER}/tx/${repayHash}`} target="_blank" rel="noreferrer"
-                            style={{ display: "block", marginTop: "8px", fontSize: "9px", color: "var(--cyan)", textAlign: "center", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                            Tx: {shortAddr(repayHash)} ↗
-                          </a>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Withdraw Collateral */}
-                    {hasCollateral && !hasLoan && (
-                      <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "24px" }}>
-                        <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "20px", marginBottom: "14px" }}>
-                          Withdraw <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Collateral</em>
-                        </div>
-                        <div style={{ fontSize: "12px", color: "var(--muted)", marginBottom: "16px" }}>
-                          You have {posCollateral ? Number(formatEther(posCollateral)).toFixed(4) : "—"} ETH deposited. Repay your loan first to withdraw.
-                        </div>
-                        <button type="button" className="btn-cyan"
-                          style={{ width: "100%", justifyContent: "center", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}
-                          disabled={isWithdrawing}
-                          onClick={() => doWithdraw({ address: CONTRACTS.lender, abi: LENDER_ABI, functionName: "withdrawCollateral", args: [posCollateral!] })}>
-                          {isWithdrawing ? "Withdrawing…" : "Withdraw All Collateral →"}
-                        </button>
-                        {withdrawHash && (
-                          <a href={`${SEPOLIA_EXPLORER}/tx/${withdrawHash}`} target="_blank" rel="noreferrer"
-                            style={{ display: "block", marginTop: "8px", fontSize: "9px", color: "var(--cyan)", textAlign: "center", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                            Tx: {shortAddr(withdrawHash)} ↗
-                          </a>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Cross-chain positions — honest state */}
-                    <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "24px" }}>
-                      <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "20px", marginBottom: "6px" }}>
-                        Cross-Chain <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>DeFi Positions</em>
-                      </div>
-                      <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "16px", fontFamily: "Space Mono,monospace" }}>Aggregated by Chainlink TEE</div>
-                      <div style={{ padding: "20px", background: "rgba(8,145,178,0.04)", border: "1px solid rgba(8,145,178,0.12)", textAlign: "center" }}>
-                        <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#f59e0b", margin: "0 auto 10px" }} className="pulse-cyan" />
-                        <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--slate)", marginBottom: "6px" }}>TEE Workflow Pending Deployment</div>
-                        <div style={{ fontSize: "11px", color: "var(--muted)", lineHeight: 1.7 }}>
-                          Your Aave, Morpho, Compound, and Plaid positions will appear here once the Chainlink CRE workflow deploys to the DON. The TEE queries these privately — no raw data touches the chain.
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* ════ VERIFY WALLET (LenderView) ════ */}
-          {tab === "verify" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-              <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "28px" }}>
-                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "22px", marginBottom: "8px" }}>
-                  Lender <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Verification</em>
-                </div>
-                <div style={{ fontSize: "12px", color: "var(--muted)", marginBottom: "20px", lineHeight: 1.8 }}>
-                  Paste any wallet address. The contract returns cryptographic proof of their credit tier — no financial data, no positions, no amounts. Just the tier and whether it's valid.
-                </div>
-
-                <div style={{ display: "flex", gap: "10px", marginBottom: "18px" }}>
-                  <input
-                    type="text"
-                    value={verifyAddr}
-                    onChange={e => { setVerifyAddr(e.target.value); setVerifyResult(null); }}
-                    placeholder="0x... wallet address"
-                    className="guard-input"
-                    style={{ flex: 1, fontFamily: "Space Mono,monospace", fontSize: "12px" }}
-                  />
-                  <button type="button" className="btn-cyan"
-                    style={{ padding: "10px 20px", fontSize: "10px", whiteSpace: "nowrap", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}
-                    disabled={!isAddress(verifyAddr) || isVerifying}
-                    onClick={() => { setVerifyResult(null); doVerify(); }}>
-                    {isVerifying ? "Checking…" : "Verify →"}
-                  </button>
-                </div>
-
-                {!isAddress(verifyAddr) && verifyAddr.length > 0 && (
-                  <div style={{ fontSize: "11px", color: "#ef4444", fontFamily: "Space Mono,monospace", marginBottom: "12px" }}>Invalid address format</div>
-                )}
-
-                {verifyResult && (
-                  <div style={{ padding: "24px", background: verifyResult.valid ? "rgba(16,185,129,0.05)" : "rgba(239,68,68,0.05)", border: `1px solid ${verifyResult.valid ? "rgba(16,185,129,0.3)" : "rgba(239,68,68,0.25)"}` }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-                      <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "64px", fontWeight: 300, color: verifyResult.valid ? (TIER_COLORS[verifyResult.tier] ?? "var(--muted)") : "#ef4444", lineHeight: 1 }}>
-                        {verifyResult.valid ? verifyResult.tier : "✕"}
-                      </div>
-                      <div>
-                        <div style={{ fontSize: "16px", fontWeight: 700, color: verifyResult.valid ? (TIER_COLORS[verifyResult.tier] ?? "var(--muted)") : "#ef4444", fontFamily: "Space Mono,monospace", marginBottom: "6px" }}>
-                          {verifyResult.valid ? `TIER ${verifyResult.tier} — VALID` : "NOT VERIFIED"}
-                        </div>
-                        {verifyResult.valid && (
-                          <>
-                            <div style={{ fontSize: "12px", color: "var(--muted)", marginBottom: "4px" }}>
-                              Tier name: <strong style={{ color: "var(--slate)" }}>{TIER_NAMES[verifyResult.tier]}</strong>
-                            </div>
-                            <div style={{ fontSize: "12px", color: "var(--muted)", marginBottom: "4px" }}>
-                              Rate: <strong style={{ color: "var(--cyan)" }}>{TIER_RATES[verifyResult.tier]} APR</strong>
-                            </div>
-                            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                              Expires: <strong style={{ color: "var(--slate)", fontFamily: "Space Mono,monospace" }}>{formatExpiry(verifyResult.expiry).label}</strong>
-                            </div>
-                          </>
-                        )}
-                        {!verifyResult.valid && (
-                          <div style={{ fontSize: "12px", color: "var(--muted)" }}>No valid attestation found for this address.</div>
-                        )}
-                      </div>
-                    </div>
-
-                    <div style={{ marginTop: "16px", padding: "10px 14px", background: "rgba(8,145,178,0.04)", border: "1px solid rgba(8,145,178,0.1)", fontSize: "10px", fontFamily: "Space Mono,monospace", color: "var(--muted)" }}>
-                      <span style={{ color: "var(--cyan)" }}>verifyAttestation</span>({shortAddr(verifyAddr)}, minTier=1) → ({verifyResult.valid.toString()}, {verifyResult.tier}, {formatExpiry(verifyResult.expiry).label})
-                    </div>
-                    <div style={{ marginTop: "8px", fontSize: "10px", color: "var(--muted)", fontFamily: "Space Mono,monospace" }}>
-                      ↳ No financial data returned. Only cryptographic truth of tier validity.
-                    </div>
-                  </div>
-                )}
-
-                {/* How it works for lenders */}
-                <div style={{ marginTop: "20px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "12px" }}>
-                  {[
-                    { n: "I", t: "Zero data exposure", b: "verifyAttestation() returns only (bool, tier, expiry). No collateral amounts, no positions, no scores." },
-                    { n: "II", t: "On-chain truth", b: "The attestation was minted by the Chainlink TEE workflow. It cannot be forged. Only the CRE workflow address can mint." },
-                    { n: "III", t: "24-hour freshness", b: "Attestations expire after 24h. The guardian re-scores automatically. Stale scores cannot be replayed." },
-                  ].map(s => (
-                    <div key={s.n} style={{ padding: "14px", background: "var(--deep)", border: "1px solid rgba(8,145,178,0.08)" }}>
-                      <div style={{ fontSize: "10px", fontWeight: 700, color: "var(--cyan)", fontFamily: "Space Mono,monospace", marginBottom: "6px" }}>{s.n}</div>
-                      <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--slate)", marginBottom: "4px" }}>{s.t}</div>
-                      <div style={{ fontSize: "10px", color: "var(--muted)", lineHeight: 1.6 }}>{s.b}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ════ SETTINGS ════ */}
-          {tab === "settings" && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px", alignItems: "start" }}>
-
-              <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "22px 20px" }}>
-                <div style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: "17px", marginBottom: "16px" }}>
-                  TEE <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Permission</em>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
-                  <div>
-                    <div style={{ fontSize: "12px", color: "var(--slate)", fontWeight: 500 }}>Cross-chain position read</div>
-                    <div style={{ fontSize: "10px", color: "var(--muted)", marginTop: "2px" }}>Aave · Morpho · Compound · Plaid</div>
-                  </div>
-                  <span style={{ fontSize: "9px", fontWeight: 700, padding: "3px 8px", fontFamily: "Space Mono,monospace", background: hasPerm ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)", color: hasPerm ? "#10b981" : "#ef4444", border: `1px solid ${hasPerm ? "rgba(16,185,129,0.2)" : "rgba(239,68,68,0.2)"}` }}>
-                    {!isConnected ? "—" : hasPerm ? "GRANTED" : "REVOKED"}
-                  </span>
-                </div>
-                {isConnected && (
-                  hasPerm ? (
-                    <button type="button" onClick={() => revokePerm({ address: CONTRACTS.attestation, abi: ATTESTATION_ABI, functionName: "revokePermission" })} disabled={isRevoking}
-                      style={{ width: "100%", padding: "10px", background: "rgba(220,38,38,0.08)", color: "#ef4444", border: "1px solid rgba(220,38,38,0.2)", fontSize: "9px", fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", cursor: "pointer", fontFamily: "Space Mono,monospace" }}>
-                      {isRevoking ? "Revoking…" : "Revoke Permission"}
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => grantPerm({ address: CONTRACTS.attestation, abi: ATTESTATION_ABI, functionName: "grantPermission" })} disabled={isGranting || grantPending} className="btn-cyan"
-                      style={{ width: "100%", justifyContent: "center", padding: "10px", fontSize: "10px", clipPath: "polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%)" }}>
-                      {isGranting || grantPending ? "Confirming…" : "Grant Permission →"}
-                    </button>
-                  )
-                )}
-                {(grantHash || revokeHash) && (
-                  <a href={`${SEPOLIA_EXPLORER}/tx/${grantHash ?? revokeHash}`} target="_blank" rel="noreferrer"
-                    style={{ display: "block", marginTop: "8px", fontSize: "9px", color: "var(--cyan)", textAlign: "center", fontFamily: "Space Mono,monospace", textDecoration: "none" }}>
-                    View tx on Etherscan →
-                  </a>
-                )}
-              </div>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-                <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)" }}>
-                  <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(8,145,178,0.08)", fontFamily: "'Cormorant Garamond',serif", fontSize: "17px" }}>
-                    Wallet <em style={{ color: "var(--cyan)", fontStyle: "italic" }}>Info</em>
-                  </div>
-                  {[
-                    ["Address", address ? shortAddr(address) : "Not connected",  address ? "var(--cyan)" : "var(--muted)"],
-                    ["Network", "Sepolia Testnet",                                "var(--slate2)"],
-                    ["Status",  isConnected ? "Connected" : "Disconnected",       isConnected ? "#10b981" : "#ef4444"],
-                    ["NFTs Minted", nftSupply !== undefined ? nftSupply.toString() : "…", "var(--muted)"],
-                  ].map(([l, v, c]) => (
-                    <div key={l as string} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 18px", borderBottom: "1px solid rgba(8,145,178,0.06)", fontSize: "12px" }}>
-                      <span style={{ color: "var(--muted)", fontWeight: 300 }}>{l}</span>
-                      <span style={{ fontFamily: "Space Mono,monospace", fontSize: "11px", color: c as string }}>{v}</span>
-                    </div>
-                  ))}
-                </div>
-
-                <div style={{ background: "var(--card)", border: "1px solid rgba(8,145,178,0.1)", padding: "14px 18px" }}>
-                  <div style={{ fontSize: "10px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", color: "var(--muted)", marginBottom: "10px", fontFamily: "Space Mono,monospace" }}>CCIP Cross-Chain</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                    <span style={{ fontSize: "11px", color: "var(--slate2)" }}>Base Sepolia Receiver</span>
-                    <span style={{ fontSize: "9px", fontWeight: 700, padding: "2px 6px", background: "rgba(16,185,129,0.1)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)", fontFamily: "Space Mono,monospace" }}>LIVE</span>
-                  </div>
-                  <a href="https://ccip.chain.link/" target="_blank" rel="noreferrer"
-                    style={{ display: "block", fontSize: "10px", color: "var(--cyan)", fontFamily: "Space Mono,monospace", textDecoration: "none", marginTop: "4px" }}>
-                    {shortAddr(CONTRACTS.ccipReceiver)} · Base Sepolia ↗
-                  </a>
-                </div>
-              </div>
-            </div>
-          )}
-
         </div>
       </div>
     </div>
