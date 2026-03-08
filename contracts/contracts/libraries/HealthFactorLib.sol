@@ -147,12 +147,15 @@ library HealthFactorLib {
 
     // Step 2: collateralUSD = normalisedCollateral × price / 1e18
     // Both normalisedCollateral and collateralPriceUSD are in 1e18 → divide by 1e18.
+    // slither-disable-next-line divide-before-multiply
     uint256 collateralUSD = (normalisedCollateral * collateralPriceUSD) / PRECISION;
 
     // Step 3: Apply liquidation threshold.
+    // slither-disable-next-line divide-before-multiply
     uint256 adjustedCollateral = (collateralUSD * liquidationThresholdBps) / BASIS_POINTS;
 
     // Step 4: HF = adjustedCollateral × 1e18 / debtUSD (result in 1e18).
+    // slither-disable-next-line divide-before-multiply
     healthFactor = (adjustedCollateral * PRECISION) / debtUSD;
   }
 

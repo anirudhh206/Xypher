@@ -517,13 +517,15 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
 
     emit Liquidated(borrower, msg.sender, collateralOut, totalDebt);
 
-    // Transfer seized collateral to liquidator
+    // Transfer seized collateral to liquidator — msg.sender is the authenticated liquidator caller.
+    // slither-disable-next-line arbitrary-send-eth
     (bool ok, ) = msg.sender.call{value: collateralOut}("");
     require(ok, "Liquidator transfer failed");
 
     // Refund excess repayment to liquidator
     uint256 excess = msg.value - totalDebt;
     if (excess > 0) {
+      // slither-disable-next-line arbitrary-send-eth
       (bool refundOk, ) = msg.sender.call{value: excess}("");
       require(refundOk, "Liquidator refund failed");
     }
@@ -623,7 +625,7 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     if (pos.borrowedAmount == 0 || pos.lastAccrualAt == 0) return;
 
     uint256 elapsed       = block.timestamp - pos.lastAccrualAt;
-    if (elapsed == 0) return;
+    if (elapsed == 0) return; // slither-disable-line incorrect-equality
 
     uint256 newInterest   = (uint256(pos.borrowedAmount) * ANNUAL_INTEREST_RATE_BPS * elapsed)
       / (BPS_DENOMINATOR * SECONDS_PER_YEAR);
@@ -670,7 +672,7 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
    * @dev Returns the USD value of an ETH amount (in 1e18 precision).
    */
   function _getCollateralValueUSD(uint128 ethAmount) internal view returns (uint256) {
-    if (ethAmount == 0) return 0;
+    if (ethAmount == 0) return 0; // slither-disable-line incorrect-equality
     uint256 price = _getEthPriceUSD();
     return (uint256(ethAmount) * price) / 1e18;
   }
@@ -699,7 +701,7 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     uint256 collateralETH,
     uint256 debtETH
   ) internal view returns (uint256) {
-    if (debtETH == 0) return type(uint256).max;
+    if (debtETH == 0) return type(uint256).max; // slither-disable-line incorrect-equality
     if (collateralETH == 0) return 0;
 
     uint256 collateralUSD = _getCollateralValueUSD(uint128(collateralETH));

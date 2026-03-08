@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Light backgrounds */
+  --void:#f8f8fc; --deep:#f1f1f9; --abyss:#eaeaf4; --surface:#ededf7; --card:#ffffff;
+  /* Cyan accent — dark enough to read on white */
+  --cyan:#0891b2; --cyan2:#0e7490; --cyan-dim:#bae6fd;
+  /* Indigo secondary */
+  --indigo:#4f46e5; --indigo2:#6366f1;
+  --crimson:#dc2626;
+  /* Text hierarchy — dark on white */
+  --slate:#1e293b; --slate2:#475569; --muted:#94a3b8;
+  /* Borders */
+  --border:rgba(0,0,0,0.09); --border2:rgba(8,145,178,0.35);
+  /* Status */
+  --success:#059669; --danger:#dc2626; --warning:#d97706;
+  /* Tiers */
+  --tier1:#0891b2; --tier2:#059669; --tier3:#4f46e5; --tier4:#d97706; --tier5:#dc2626;
+}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--void);
+  color:var(--slate);
+  font-family:'Space Grotesk',sans-serif;
+  font-size:14px;
+  line-height:1.6;
+  overflow-x:hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-track{background:var(--deep)}
+::-webkit-scrollbar-thumb{background:var(--cyan-dim)}
+::-webkit-scrollbar-thumb:hover{background:var(--cyan)}
+
+/* Guard emblem — hexagonal security mark */
+.guard-emblem{
+  width:32px;height:32px;
+  border:1px solid rgba(8,145,178,0.35);
+  clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+  position:relative;flex-shrink:0;
+  background:rgba(8,145,178,0.08);
+}
+.guard-emblem::before{
+  content:'';position:absolute;inset:6px;
+  clip-path:polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
+  border:1px solid var(--cyan);
+  background:rgba(8,145,178,0.12);
+}
+
+/* Buttons */
+.btn-cyan{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:14px 38px;
+  background:var(--cyan);color:#ffffff;
+  font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;
+  letter-spacing:0.22em;text-transform:uppercase;
+  border:none;cursor:pointer;
+  clip-path:polygon(12px 0%,100% 0%,calc(100% - 12px) 100%,0% 100%);
+  transition:background .25s,transform .25s,box-shadow .25s;
+  text-decoration:none;
+}
+.btn-cyan:hover{background:var(--cyan2);transform:translateY(-1px);box-shadow:0 8px 24px rgba(8,145,178,0.22)}
+
+.btn-ghost{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:13px 38px;
+  background:transparent;color:var(--slate2);
+  border:1px solid rgba(0,0,0,0.18);
+  font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:700;
+  letter-spacing:0.22em;text-transform:uppercase;
+  cursor:pointer;transition:all .25s;
+  position:relative;overflow:hidden;text-decoration:none;
+}
+.btn-ghost::before{content:'';position:absolute;inset:0;background:var(--cyan);transform:scaleX(0);transform-origin:left;transition:transform .35s;z-index:-1}
+.btn-ghost:hover{color:#ffffff;border-color:var(--cyan)}
+.btn-ghost:hover::before{transform:scaleX(1)}
+
+/* Eyebrow */
+.eyebrow{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.eyebrow-line{width:32px;height:1px;background:var(--cyan)}
+.eyebrow-text{font-size:10px;font-weight:600;letter-spacing:0.32em;text-transform:uppercase;color:var(--cyan)}
+
+/* Card */
+.guard-card{
+  background:var(--card);
+  border:1px solid var(--border);
+  position:relative;overflow:hidden;
+  transition:border-color .25s,box-shadow .25s;
+  box-shadow:0 1px 3px rgba(0,0,0,0.05);
+}
+.guard-card:hover{
+  border-color:rgba(8,145,178,0.3);
+  box-shadow:0 4px 16px rgba(0,0,0,0.08);
+}
+.guard-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+  transform:scaleX(0);transform-origin:left;transition:transform .45s;
+}
+.guard-card:hover::before{transform:scaleX(1)}
+
+/* Badges */
+.badge{display:inline-flex;align-items:center;padding:3px 9px;font-size:9px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;font-family:'Space Mono',monospace}
+.badge-tier1{background:rgba(8,145,178,0.08);color:#0891b2;border:1px solid rgba(8,145,178,0.22)}
+.badge-tier2{background:rgba(5,150,105,0.08);color:#059669;border:1px solid rgba(5,150,105,0.22)}
+.badge-tier3{background:rgba(79,70,229,0.08);color:#4f46e5;border:1px solid rgba(79,70,229,0.22)}
+.badge-tier4{background:rgba(217,119,6,0.08);color:#d97706;border:1px solid rgba(217,119,6,0.22)}
+.badge-tier5{background:rgba(220,38,38,0.08);color:#dc2626;border:1px solid rgba(220,38,38,0.22)}
+.badge-active{background:rgba(5,150,105,0.08);color:#059669;border:1px solid rgba(5,150,105,0.22)}
+.badge-pending{background:rgba(217,119,6,0.08);color:#d97706;border:1px solid rgba(217,119,6,0.22)}
+.badge-critical{background:rgba(220,38,38,0.08);color:#dc2626;border:1px solid rgba(220,38,38,0.22)}
+
+/* Input */
+.guard-input{
+  width:100%;background:#f8f8fc;border:1px solid rgba(0,0,0,0.12);
+  color:var(--slate);padding:11px 14px;
+  font-family:'Space Grotesk',sans-serif;font-size:13px;font-weight:400;
+  outline:none;transition:border-color .2s;cursor:text;
+}
+.guard-input:focus{border-color:rgba(8,145,178,0.5);box-shadow:0 0 0 3px rgba(8,145,178,0.08)}
+.guard-input::placeholder{color:var(--muted)}
+
+/* Mono utility */
+.mono{font-family:'Space Mono',monospace}
+
+/* Spin — used for wallet connecting state only */
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Pulse — subtle, used for status dots */
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.5}}
+.pulse-cyan{animation:pulse-dot 2s ease infinite}

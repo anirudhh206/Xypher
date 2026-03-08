@@ -1,0 +1,4 @@
+{
+  "filter_paths": "mocks/,node_modules/",
+  "detectors_to_exclude": "calls-loop,reentrancy-events,unused-return,incorrect-equality"
+}

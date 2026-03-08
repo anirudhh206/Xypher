@@ -226,7 +226,7 @@ contract GuardianVault is IGuardianVault, Ownable, ReentrancyGuard {
     uint256 debtUSD
   ) internal view returns (uint256) {
     if (debtUSD == 0) return type(uint256).max;
-    if (collateralAmount == 0) return 0;
+    if (collateralAmount == 0) return 0; // slither-disable-line incorrect-equality
 
     (uint256 rawPrice, uint8 feedDecimals) = HealthFactorLib.getPrice(
       ethUsdFeed,

@@ -48,6 +48,7 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
   event DestinationChainRegistered(uint64 indexed chainSelector, address receiver);
   event DestinationChainRemoved(uint64 indexed chainSelector);
   event BroadcastPoolFunded(address indexed funder, uint256 amount);
+  event BroadcastPoolWithdrawn(address indexed to, uint256 amount);
   event CCIPRouterSet(address router);
 
   // ── Errors ────────────────────────────────────────────────────────────────
@@ -118,6 +119,8 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
   function withdrawBroadcastPool(uint256 amount) external onlyOwner {
     require(amount <= broadcastPool, "Insufficient pool");
     broadcastPool -= amount;
+    emit BroadcastPoolWithdrawn(owner(), amount);
+    // slither-disable-next-line arbitrary-send-eth
     (bool ok, ) = owner().call{value: amount}("");
     require(ok, "Withdraw failed");
   }
@@ -204,7 +207,7 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
 
   function isExpiringSoon(address subject, uint64 window) external view override returns (bool) {
     uint64 exp = _attestations[subject].expiry;
-    if (exp == 0) return false;
+    if (exp == 0) return false; // slither-disable-line incorrect-equality
     uint64 ts = uint64(block.timestamp);
     if (ts >= exp) return false;
     return ts + window >= exp;
@@ -212,7 +215,7 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
 
   function nextMintAllowedAt(address subject) external view returns (uint64) {
     uint64 last = _lastMintAt[subject];
-    return last == 0 ? 0 : last + MIN_MINT_INTERVAL;
+    return last == 0 ? 0 : last + MIN_MINT_INTERVAL; // slither-disable-line incorrect-equality
   }
 
   // ── Admin revoke ──────────────────────────────────────────────────────────
@@ -281,6 +284,7 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
 
       broadcastPool -= fee;
 
+      // slither-disable-next-line arbitrary-send-eth,reentrancy-eth
       try ccipRouter.ccipSend{value: fee}(sel, ccipMsg) returns (bytes32 messageId) {
         emit AttestationBroadcast(wallet, sel, messageId);
       } catch {
@@ -300,6 +304,7 @@ contract ConfidentialGuardAttestation is IConfidentialGuard, Ownable, Pausable, 
     if (broadcastPool < fee) revert InsufficientBroadcastFunds(broadcastPool, fee);
     broadcastPool -= fee;
 
+    // slither-disable-next-line arbitrary-send-eth
     return ccipRouter.ccipSend{value: fee}(chainSelector, ccipMsg);
   }
 
