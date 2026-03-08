@@ -1685,6 +1685,40 @@ function base64Decode(base64Str) {
     throw Error("invalid base64 string");
   return bytes.subarray(0, bytePos);
 }
+function base64Encode(bytes, encoding = "std") {
+  const table = getEncodeTable(encoding);
+  const pad = encoding == "std";
+  let base64 = "", groupPos = 0, b, p = 0;
+  for (let i = 0;i < bytes.length; i++) {
+    b = bytes[i];
+    switch (groupPos) {
+      case 0:
+        base64 += table[b >> 2];
+        p = (b & 3) << 4;
+        groupPos = 1;
+        break;
+      case 1:
+        base64 += table[p | b >> 4];
+        p = (b & 15) << 2;
+        groupPos = 2;
+        break;
+      case 2:
+        base64 += table[p | b >> 6];
+        base64 += table[b & 63];
+        groupPos = 0;
+        break;
+    }
+  }
+  if (groupPos) {
+    base64 += table[p];
+    if (pad) {
+      base64 += "=";
+      if (groupPos == 1)
+        base64 += "=";
+    }
+  }
+  return base64;
+}
 var encodeTableStd;
 var encodeTableUrl;
 var decodeTable;
@@ -3268,6 +3302,17 @@ var NullValue;
 (function(NullValue2) {
   NullValue2[NullValue2["NULL_VALUE"] = 0] = "NULL_VALUE";
 })(NullValue || (NullValue = {}));
+function getExtension(message, extension) {
+  assertExtendee(extension, message);
+  const ufs = filterUnknownFields(message.$unknown, extension);
+  const [container, field, get] = createExtensionContainer(extension);
+  for (const uf of ufs) {
+    readField(container, new BinaryReader(uf.data), field, uf.wireType, {
+      readUnknownFields: true
+    });
+  }
+  return get();
+}
 function setExtension(message, extension, value) {
   var _a;
   assertExtendee(extension, message);
@@ -3282,6 +3327,19 @@ function setExtension(message, extension, value) {
     ufs.push({ no, wireType, data });
   }
   message.$unknown = ufs;
+}
+function filterUnknownFields(unknownFields, extension) {
+  if (unknownFields === undefined)
+    return [];
+  if (extension.fieldKind === "enum" || extension.fieldKind === "scalar") {
+    for (let i = unknownFields.length - 1;i >= 0; --i) {
+      if (unknownFields[i].no == extension.number) {
+        return [unknownFields[i]];
+      }
+    }
+    return [];
+  }
+  return unknownFields.filter((uf) => uf.no === extension.number);
 }
 function createExtensionContainer(extension, value) {
   const localName = extension.typeName;
@@ -3308,6 +3366,314 @@ function assertExtendee(extension, message) {
   if (extension.extendee.typeName != message.$typeName) {
     throw new Error(`extension ${extension.typeName} can only be applied to message ${extension.extendee.typeName}`);
   }
+}
+var LEGACY_REQUIRED3 = 3;
+var IMPLICIT4 = 2;
+var jsonWriteDefaults = {
+  alwaysEmitImplicit: false,
+  enumAsInteger: false,
+  useProtoFieldName: false
+};
+function makeWriteOptions2(options) {
+  return options ? Object.assign(Object.assign({}, jsonWriteDefaults), options) : jsonWriteDefaults;
+}
+function toJson(schema, message, options) {
+  return reflectToJson(reflect(schema, message), makeWriteOptions2(options));
+}
+function reflectToJson(msg, opts) {
+  var _a;
+  const wktJson = tryWktToJson(msg, opts);
+  if (wktJson !== undefined)
+    return wktJson;
+  const json = {};
+  for (const f of msg.sortedFields) {
+    if (!msg.isSet(f)) {
+      if (f.presence == LEGACY_REQUIRED3) {
+        throw new Error(`cannot encode ${f} to JSON: required field not set`);
+      }
+      if (!opts.alwaysEmitImplicit || f.presence !== IMPLICIT4) {
+        continue;
+      }
+    }
+    const jsonValue = fieldToJson(f, msg.get(f), opts);
+    if (jsonValue !== undefined) {
+      json[jsonName(f, opts)] = jsonValue;
+    }
+  }
+  if (opts.registry) {
+    const tagSeen = new Set;
+    for (const { no } of (_a = msg.getUnknown()) !== null && _a !== undefined ? _a : []) {
+      if (!tagSeen.has(no)) {
+        tagSeen.add(no);
+        const extension = opts.registry.getExtensionFor(msg.desc, no);
+        if (!extension) {
+          continue;
+        }
+        const value = getExtension(msg.message, extension);
+        const [container, field] = createExtensionContainer(extension, value);
+        const jsonValue = fieldToJson(field, container.get(field), opts);
+        if (jsonValue !== undefined) {
+          json[extension.jsonName] = jsonValue;
+        }
+      }
+    }
+  }
+  return json;
+}
+function fieldToJson(f, val, opts) {
+  switch (f.fieldKind) {
+    case "scalar":
+      return scalarToJson(f, val);
+    case "message":
+      return reflectToJson(val, opts);
+    case "enum":
+      return enumToJsonInternal(f.enum, val, opts.enumAsInteger);
+    case "list":
+      return listToJson(val, opts);
+    case "map":
+      return mapToJson(val, opts);
+  }
+}
+function mapToJson(map, opts) {
+  const f = map.field();
+  const jsonObj = {};
+  switch (f.mapKind) {
+    case "scalar":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = scalarToJson(f, entryValue);
+      }
+      break;
+    case "message":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = reflectToJson(entryValue, opts);
+      }
+      break;
+    case "enum":
+      for (const [entryKey, entryValue] of map) {
+        jsonObj[entryKey] = enumToJsonInternal(f.enum, entryValue, opts.enumAsInteger);
+      }
+      break;
+  }
+  return opts.alwaysEmitImplicit || map.size > 0 ? jsonObj : undefined;
+}
+function listToJson(list, opts) {
+  const f = list.field();
+  const jsonArr = [];
+  switch (f.listKind) {
+    case "scalar":
+      for (const item of list) {
+        jsonArr.push(scalarToJson(f, item));
+      }
+      break;
+    case "enum":
+      for (const item of list) {
+        jsonArr.push(enumToJsonInternal(f.enum, item, opts.enumAsInteger));
+      }
+      break;
+    case "message":
+      for (const item of list) {
+        jsonArr.push(reflectToJson(item, opts));
+      }
+      break;
+  }
+  return opts.alwaysEmitImplicit || jsonArr.length > 0 ? jsonArr : undefined;
+}
+function enumToJsonInternal(desc, value, enumAsInteger) {
+  var _a;
+  if (typeof value != "number") {
+    throw new Error(`cannot encode ${desc} to JSON: expected number, got ${formatVal(value)}`);
+  }
+  if (desc.typeName == "google.protobuf.NullValue") {
+    return null;
+  }
+  if (enumAsInteger) {
+    return value;
+  }
+  const val = desc.value[value];
+  return (_a = val === null || val === undefined ? undefined : val.name) !== null && _a !== undefined ? _a : value;
+}
+function scalarToJson(field, value) {
+  var _a, _b, _c, _d, _e, _f;
+  switch (field.scalar) {
+    case ScalarType.INT32:
+    case ScalarType.SFIXED32:
+    case ScalarType.SINT32:
+    case ScalarType.FIXED32:
+    case ScalarType.UINT32:
+      if (typeof value != "number") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_a = checkField(field, value)) === null || _a === undefined ? undefined : _a.message}`);
+      }
+      return value;
+    case ScalarType.FLOAT:
+    case ScalarType.DOUBLE:
+      if (typeof value != "number") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_b = checkField(field, value)) === null || _b === undefined ? undefined : _b.message}`);
+      }
+      if (Number.isNaN(value))
+        return "NaN";
+      if (value === Number.POSITIVE_INFINITY)
+        return "Infinity";
+      if (value === Number.NEGATIVE_INFINITY)
+        return "-Infinity";
+      return value;
+    case ScalarType.STRING:
+      if (typeof value != "string") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_c = checkField(field, value)) === null || _c === undefined ? undefined : _c.message}`);
+      }
+      return value;
+    case ScalarType.BOOL:
+      if (typeof value != "boolean") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_d = checkField(field, value)) === null || _d === undefined ? undefined : _d.message}`);
+      }
+      return value;
+    case ScalarType.UINT64:
+    case ScalarType.FIXED64:
+    case ScalarType.INT64:
+    case ScalarType.SFIXED64:
+    case ScalarType.SINT64:
+      if (typeof value != "bigint" && typeof value != "string") {
+        throw new Error(`cannot encode ${field} to JSON: ${(_e = checkField(field, value)) === null || _e === undefined ? undefined : _e.message}`);
+      }
+      return value.toString();
+    case ScalarType.BYTES:
+      if (value instanceof Uint8Array) {
+        return base64Encode(value);
+      }
+      throw new Error(`cannot encode ${field} to JSON: ${(_f = checkField(field, value)) === null || _f === undefined ? undefined : _f.message}`);
+  }
+}
+function jsonName(f, opts) {
+  return opts.useProtoFieldName ? f.name : f.jsonName;
+}
+function tryWktToJson(msg, opts) {
+  if (!msg.desc.typeName.startsWith("google.protobuf.")) {
+    return;
+  }
+  switch (msg.desc.typeName) {
+    case "google.protobuf.Any":
+      return anyToJson(msg.message, opts);
+    case "google.protobuf.Timestamp":
+      return timestampToJson(msg.message);
+    case "google.protobuf.Duration":
+      return durationToJson(msg.message);
+    case "google.protobuf.FieldMask":
+      return fieldMaskToJson(msg.message);
+    case "google.protobuf.Struct":
+      return structToJson(msg.message);
+    case "google.protobuf.Value":
+      return valueToJson(msg.message);
+    case "google.protobuf.ListValue":
+      return listValueToJson(msg.message);
+    default:
+      if (isWrapperDesc(msg.desc)) {
+        const valueField = msg.desc.fields[0];
+        return scalarToJson(valueField, msg.get(valueField));
+      }
+      return;
+  }
+}
+function anyToJson(val, opts) {
+  if (val.typeUrl === "") {
+    return {};
+  }
+  const { registry } = opts;
+  let message;
+  let desc;
+  if (registry) {
+    message = anyUnpack(val, registry);
+    if (message) {
+      desc = registry.getMessage(message.$typeName);
+    }
+  }
+  if (!desc || !message) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: "${val.typeUrl}" is not in the type registry`);
+  }
+  let json = reflectToJson(reflect(desc, message), opts);
+  if (desc.typeName.startsWith("google.protobuf.") || json === null || Array.isArray(json) || typeof json !== "object") {
+    json = { value: json };
+  }
+  json["@type"] = val.typeUrl;
+  return json;
+}
+function durationToJson(val) {
+  if (Number(val.seconds) > 315576000000 || Number(val.seconds) < -315576000000) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: value out of range`);
+  }
+  let text = val.seconds.toString();
+  if (val.nanos !== 0) {
+    let nanosStr = Math.abs(val.nanos).toString();
+    nanosStr = "0".repeat(9 - nanosStr.length) + nanosStr;
+    if (nanosStr.substring(3) === "000000") {
+      nanosStr = nanosStr.substring(0, 3);
+    } else if (nanosStr.substring(6) === "000") {
+      nanosStr = nanosStr.substring(0, 6);
+    }
+    text += "." + nanosStr;
+    if (val.nanos < 0 && Number(val.seconds) == 0) {
+      text = "-" + text;
+    }
+  }
+  return text + "s";
+}
+function fieldMaskToJson(val) {
+  return val.paths.map((p) => {
+    if (p.match(/_[0-9]?_/g) || p.match(/[A-Z]/g)) {
+      throw new Error(`cannot encode message ${val.$typeName} to JSON: lowerCamelCase of path name "` + p + '" is irreversible');
+    }
+    return protoCamelCase(p);
+  }).join(",");
+}
+function structToJson(val) {
+  const json = {};
+  for (const [k, v] of Object.entries(val.fields)) {
+    json[k] = valueToJson(v);
+  }
+  return json;
+}
+function valueToJson(val) {
+  switch (val.kind.case) {
+    case "nullValue":
+      return null;
+    case "numberValue":
+      if (!Number.isFinite(val.kind.value)) {
+        throw new Error(`${val.$typeName} cannot be NaN or Infinity`);
+      }
+      return val.kind.value;
+    case "boolValue":
+      return val.kind.value;
+    case "stringValue":
+      return val.kind.value;
+    case "structValue":
+      return structToJson(val.kind.value);
+    case "listValue":
+      return listValueToJson(val.kind.value);
+    default:
+      throw new Error(`${val.$typeName} must have a value`);
+  }
+}
+function listValueToJson(val) {
+  return val.values.map(valueToJson);
+}
+function timestampToJson(val) {
+  const ms = Number(val.seconds) * 1000;
+  if (ms < Date.parse("0001-01-01T00:00:00Z") || ms > Date.parse("9999-12-31T23:59:59Z")) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59Z inclusive`);
+  }
+  if (val.nanos < 0) {
+    throw new Error(`cannot encode message ${val.$typeName} to JSON: nanos must not be negative`);
+  }
+  let z = "Z";
+  if (val.nanos > 0) {
+    const nanosStr = (val.nanos + 1e9).toString().substring(1);
+    if (nanosStr.substring(3) === "000000") {
+      z = "." + nanosStr.substring(0, 3) + "Z";
+    } else if (nanosStr.substring(6) === "000") {
+      z = "." + nanosStr.substring(0, 6) + "Z";
+    } else {
+      z = "." + nanosStr + "Z";
+    }
+  }
+  return new Date(ms).toISOString().replace(".000Z", z);
 }
 var jsonReadDefaults = {
   ignoreUnknownFields: false
@@ -3877,6 +4243,39 @@ var hexToBytes = (hexStr) => {
   }
   return bytes;
 };
+var bytesToHex = (bytes) => {
+  return `0x${Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+};
+var hexToBase64 = (hex) => {
+  const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (cleanHex.length === 0) {
+    return "";
+  }
+  if (cleanHex.length % 2 !== 0) {
+    throw new Error(`Hex string must have an even number of characters: ${hex}`);
+  }
+  if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
+    throw new Error(`Invalid hex string: ${hex}`);
+  }
+  return Buffer.from(cleanHex, "hex").toString("base64");
+};
+var bigintToBytes = (n) => {
+  if (n < 0n) {
+    throw new Error(`bigintToBytes does not support negative values: ${n}`);
+  }
+  if (n === 0n) {
+    return new Uint8Array;
+  }
+  const hex = n.toString(16);
+  return Buffer.from(hex.padStart(hex.length + hex.length % 2, "0"), "hex");
+};
+var bytesToBigint = (bytes) => {
+  let result = 0n;
+  for (const byte of bytes) {
+    result = (result << 8n) + BigInt(byte);
+  }
+  return result;
+};
 function createWriteCreReportRequest(input) {
   return {
     receiver: hexToBytes(input.receiver),
@@ -4227,50 +4626,11 @@ class ClientCapability3 {
     return runtime.runInNodeMode(wrappedFn, consensusAggregation, unwrapOptions);
   }
 }
-var file_capabilities_networking_http_v1alpha_trigger = /* @__PURE__ */ fileDesc("CjJjYXBhYmlsaXRpZXMvbmV0d29ya2luZy9odHRwL3YxYWxwaGEvdHJpZ2dlci5wcm90bxIkY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhIlYKBkNvbmZpZxJMCg9hdXRob3JpemVkX2tleXMYASADKAsyMy5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGEuQXV0aG9yaXplZEtleSJaCgdQYXlsb2FkEg0KBWlucHV0GAEgASgMEkAKA2tleRgCIAEoCzIzLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5BdXRob3JpemVkS2V5ImAKDUF1dGhvcml6ZWRLZXkSOwoEdHlwZRgBIAEoDjItLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5LZXlUeXBlEhIKCnB1YmxpY19rZXkYAiABKAkqOwoHS2V5VHlwZRIYChRLRVlfVFlQRV9VTlNQRUNJRklFRBAAEhYKEktFWV9UWVBFX0VDRFNBX0VWTRABMpIBCgRIVFRQEmgKB1RyaWdnZXISLC5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGEuQ29uZmlnGi0uY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhLlBheWxvYWQwARoggrUYHAgBEhhodHRwLXRyaWdnZXJAMS4wLjAtYWxwaGFC6wEKKGNvbS5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGFCDFRyaWdnZXJQcm90b1ABogIDQ05IqgIkQ2FwYWJpbGl0aWVzLk5ldHdvcmtpbmcuSHR0cC5WMWFscGhhygIkQ2FwYWJpbGl0aWVzXE5ldHdvcmtpbmdcSHR0cFxWMWFscGhh4gIwQ2FwYWJpbGl0aWVzXE5ldHdvcmtpbmdcSHR0cFxWMWFscGhhXEdQQk1ldGFkYXRh6gInQ2FwYWJpbGl0aWVzOjpOZXR3b3JraW5nOjpIdHRwOjpWMWFscGhhYgZwcm90bzM", [file_tools_generator_v1alpha_cre_metadata]);
-var ConfigSchema = /* @__PURE__ */ messageDesc(file_capabilities_networking_http_v1alpha_trigger, 0);
-var PayloadSchema = /* @__PURE__ */ messageDesc(file_capabilities_networking_http_v1alpha_trigger, 1);
 var KeyType;
 (function(KeyType2) {
   KeyType2[KeyType2["UNSPECIFIED"] = 0] = "UNSPECIFIED";
   KeyType2[KeyType2["ECDSA_EVM"] = 1] = "ECDSA_EVM";
 })(KeyType || (KeyType = {}));
-
-class HTTPCapability {
-  static CAPABILITY_ID = "http-trigger@1.0.0-alpha";
-  static CAPABILITY_NAME = "http-trigger";
-  static CAPABILITY_VERSION = "1.0.0-alpha";
-  trigger(config) {
-    const capabilityId = HTTPCapability.CAPABILITY_ID;
-    return new HTTPTrigger(config, capabilityId, "Trigger");
-  }
-}
-
-class HTTPTrigger {
-  _capabilityId;
-  _method;
-  config;
-  constructor(config, _capabilityId, _method) {
-    this._capabilityId = _capabilityId;
-    this._method = _method;
-    this.config = config.$typeName ? config : fromJson(ConfigSchema, config);
-  }
-  capabilityId() {
-    return this._capabilityId;
-  }
-  method() {
-    return this._method;
-  }
-  outputSchema() {
-    return PayloadSchema;
-  }
-  configAsAny() {
-    return anyPack(ConfigSchema, this.config);
-  }
-  adapt(rawOutput) {
-    return rawOutput;
-  }
-}
 var file_capabilities_scheduler_cron_v1_trigger = /* @__PURE__ */ fileDesc("CixjYXBhYmlsaXRpZXMvc2NoZWR1bGVyL2Nyb24vdjEvdHJpZ2dlci5wcm90bxIeY2FwYWJpbGl0aWVzLnNjaGVkdWxlci5jcm9uLnYxIhoKBkNvbmZpZxIQCghzY2hlZHVsZRgBIAEoCSJHCgdQYXlsb2FkEjwKGHNjaGVkdWxlZF9leGVjdXRpb25fdGltZRgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiNQoNTGVnYWN5UGF5bG9hZBIgChhzY2hlZHVsZWRfZXhlY3V0aW9uX3RpbWUYASABKAk6AhgBMvUBCgRDcm9uElwKB1RyaWdnZXISJi5jYXBhYmlsaXRpZXMuc2NoZWR1bGVyLmNyb24udjEuQ29uZmlnGicuY2FwYWJpbGl0aWVzLnNjaGVkdWxlci5jcm9uLnYxLlBheWxvYWQwARJzCg1MZWdhY3lUcmlnZ2VyEiYuY2FwYWJpbGl0aWVzLnNjaGVkdWxlci5jcm9uLnYxLkNvbmZpZxotLmNhcGFiaWxpdGllcy5zY2hlZHVsZXIuY3Jvbi52MS5MZWdhY3lQYXlsb2FkIgmIAgGKtRgCCAEwARoagrUYFggBEhJjcm9uLXRyaWdnZXJAMS4wLjBCzQEKImNvbS5jYXBhYmlsaXRpZXMuc2NoZWR1bGVyLmNyb24udjFCDFRyaWdnZXJQcm90b1ABogIDQ1NDqgIeQ2FwYWJpbGl0aWVzLlNjaGVkdWxlci5Dcm9uLlYxygIeQ2FwYWJpbGl0aWVzXFNjaGVkdWxlclxDcm9uXFYx4gIqQ2FwYWJpbGl0aWVzXFNjaGVkdWxlclxDcm9uXFYxXEdQQk1ldGFkYXRh6gIhQ2FwYWJpbGl0aWVzOjpTY2hlZHVsZXI6OkNyb246OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_tools_generator_v1alpha_cre_metadata]);
 var ConfigSchema2 = /* @__PURE__ */ messageDesc(file_capabilities_scheduler_cron_v1_trigger, 0);
 var PayloadSchema2 = /* @__PURE__ */ messageDesc(file_capabilities_scheduler_cron_v1_trigger, 1);
@@ -5631,15 +5991,18 @@ var handler = (trigger, fn) => ({
   fn
 });
 prepareRuntime();
-var cre = {
-  capabilities: {
-    CronCapability,
-    HTTPCapability,
-    ConfidentialHTTPClient: ClientCapability2,
-    HTTPClient: ClientCapability3,
-    EVMClient: ClientCapability
-  },
-  handler
+var bigintToProtoBigInt = (n) => {
+  if (typeof n === "number" && (!Number.isFinite(n) || !Number.isInteger(n))) {
+    throw new Error(`bigintToProtoBigInt requires an integer number, received ${n}`);
+  }
+  const val = BigInt(n);
+  const abs = val < 0n ? -val : val;
+  const sign = val === 0n ? 0n : val < 0n ? -1n : 1n;
+  const msg = create(BigIntSchema, {
+    absVal: bigintToBytes(abs),
+    sign
+  });
+  return toJson(BigIntSchema, msg);
 };
 var LAST_FINALIZED_BLOCK_NUMBER = {
   absVal: Buffer.from([3]).toString("base64"),
@@ -5649,6 +6012,42 @@ var LATEST_BLOCK_NUMBER = {
   absVal: Buffer.from([2]).toString("base64"),
   sign: "-1"
 };
+var encodeCallMsg = (payload) => ({
+  from: hexToBase64(payload.from),
+  to: hexToBase64(payload.to),
+  data: hexToBase64(payload.data)
+});
+var EVM_DEFAULT_REPORT_ENCODER = {
+  encoderName: "evm",
+  signingAlgo: "ecdsa",
+  hashingAlgo: "keccak256"
+};
+var prepareReportRequest = (hexEncodedPayload, reportEncoder = EVM_DEFAULT_REPORT_ENCODER) => ({
+  encodedPayload: hexToBase64(hexEncodedPayload),
+  ...reportEncoder
+});
+var decodeJson = (input) => {
+  const decoder = new TextDecoder("utf-8");
+  const textBody = decoder.decode(input);
+  return JSON.parse(textBody);
+};
+function json(responseOrFn) {
+  if (typeof responseOrFn === "function") {
+    return {
+      result: () => json(responseOrFn().result)
+    };
+  }
+  return decodeJson(responseOrFn.body);
+}
+function ok(responseOrFn) {
+  if (typeof responseOrFn === "function") {
+    return {
+      result: () => ok(responseOrFn().result)
+    };
+  } else {
+    return responseOrFn.statusCode >= 200 && responseOrFn.statusCode < 300;
+  }
+}
 function sendReport(runtime, report, fn) {
   const rawReport = report.x_generatedCodeOnly_unwrap();
   const request = fn(rawReport);
@@ -9891,8 +10290,8 @@ var ZodIssueCode = util.arrayToEnum([
   "not_finite"
 ]);
 var quotelessJson = (obj) => {
-  const json = JSON.stringify(obj, null, 2);
-  return json.replace(/"([^"]+)":/g, "$1:");
+  const json2 = JSON.stringify(obj, null, 2);
+  return json2.replace(/"([^"]+)":/g, "$1:");
 };
 
 class ZodError extends Error {
@@ -14176,102 +14575,3361 @@ var sendErrorResponse = (error) => {
   }
   hostBindings.sendResponse(payload);
 };
+var evmAddress = exports_external.string().regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 0x-prefixed 40-character hex address");
+var nonEmptyString = exports_external.string().min(1);
+var httpUrl = exports_external.string().regex(/^https?:\/\/.+/, "must be a valid http/https URL");
+var SUPPORTED_CHAINS = Object.keys(ClientCapability.SUPPORTED_CHAIN_SELECTORS);
+var chainSelectorEnum = exports_external.enum(SUPPORTED_CHAINS);
 var configSchema = exports_external.object({
-  schedule: exports_external.string(),
-  aaveApiUrl: exports_external.string(),
-  testWalletAddress: exports_external.string(),
-  chainSelectorName: exports_external.string()
+  attestationContractAddress: evmAddress,
+  guardianVaultAddress: evmAddress,
+  chainSelectorName: chainSelectorEnum,
+  ccipDestinationChain: chainSelectorEnum,
+  aaveApiUrl: httpUrl,
+  morphoApiUrl: httpUrl,
+  compoundApiUrl: httpUrl,
+  plaidApiUrl: httpUrl,
+  plaidSecretKey: nonEmptyString,
+  plaidSecretNamespace: nonEmptyString,
+  guardianSchedule: nonEmptyString
 });
-var getMockAavePosition = () => ({
-  protocol: "Aave V3",
-  healthFactor: 1.82,
-  totalCollateralUSD: 125000,
-  totalDebtUSD: 68681,
-  netPositionUSD: 56319,
-  atRisk: false
-});
-var computeRiskAssessment = (position) => {
-  let riskLevel;
-  let recommendation;
-  if (position.healthFactor >= 2) {
-    riskLevel = "SAFE";
-    recommendation = "Position is healthy. No action required.";
-  } else if (position.healthFactor >= 1.5) {
-    riskLevel = "MODERATE";
-    recommendation = "Monitor closely. Consider adding collateral.";
-  } else if (position.healthFactor >= 1.1) {
-    riskLevel = "HIGH";
-    recommendation = "WARNING: Approaching liquidation. Immediate action recommended.";
-  } else {
-    riskLevel = "CRITICAL";
-    recommendation = "DANGER: Liquidation imminent. Auto-protection triggered.";
+function formatAbiItem(abiItem, { includeName = false } = {}) {
+  if (abiItem.type !== "function" && abiItem.type !== "event" && abiItem.type !== "error")
+    throw new InvalidDefinitionTypeError(abiItem.type);
+  return `${abiItem.name}(${formatAbiParams(abiItem.inputs, { includeName })})`;
+}
+function formatAbiParams(params, { includeName = false } = {}) {
+  if (!params)
+    return "";
+  return params.map((param) => formatAbiParam(param, { includeName })).join(includeName ? ", " : ",");
+}
+function formatAbiParam(param, { includeName }) {
+  if (param.type.startsWith("tuple")) {
+    return `(${formatAbiParams(param.components, { includeName })})${param.type.slice("tuple".length)}`;
   }
-  return JSON.stringify({
-    protocol: position.protocol,
-    healthFactor: position.healthFactor.toFixed(4),
-    totalCollateralUSD: position.totalCollateralUSD.toFixed(2),
-    totalDebtUSD: position.totalDebtUSD.toFixed(2),
-    netPositionUSD: position.netPositionUSD.toFixed(2),
-    riskLevel,
-    recommendation,
-    atRisk: position.atRisk,
-    computedInsideTEE: true,
-    timestamp: new Date().toISOString()
-  });
+  return param.type + (includeName && param.name ? ` ${param.name}` : "");
+}
+function isHex(value2, { strict = true } = {}) {
+  if (!value2)
+    return false;
+  if (typeof value2 !== "string")
+    return false;
+  return strict ? /^0x[0-9a-fA-F]*$/.test(value2) : value2.startsWith("0x");
+}
+function size(value2) {
+  if (isHex(value2, { strict: false }))
+    return Math.ceil((value2.length - 2) / 2);
+  return value2.length;
+}
+var version = "2.34.0";
+var errorConfig = {
+  getDocsUrl: ({ docsBaseUrl, docsPath = "", docsSlug }) => docsPath ? `${docsBaseUrl ?? "https://viem.sh"}${docsPath}${docsSlug ? `#${docsSlug}` : ""}` : undefined,
+  version: `viem@${version}`
 };
-var onCronTrigger = (runtime2, _payload) => {
-  runtime2.log("[ConfidentialGuard] ======= Credit Intelligence Engine =======");
-  runtime2.log(`[ConfidentialGuard] Wallet: ${runtime2.config.testWalletAddress}`);
-  runtime2.log("[ConfidentialGuard] Step 1: Fetching Aave positions...");
-  const confHttp = new cre.capabilities.ConfidentialHTTPClient;
-  const url = `${runtime2.config.aaveApiUrl}/data/users/${runtime2.config.testWalletAddress}`;
-  let position;
+
+class BaseError extends Error {
+  constructor(shortMessage, args = {}) {
+    const details = (() => {
+      if (args.cause instanceof BaseError)
+        return args.cause.details;
+      if (args.cause?.message)
+        return args.cause.message;
+      return args.details;
+    })();
+    const docsPath = (() => {
+      if (args.cause instanceof BaseError)
+        return args.cause.docsPath || args.docsPath;
+      return args.docsPath;
+    })();
+    const docsUrl = errorConfig.getDocsUrl?.({ ...args, docsPath });
+    const message = [
+      shortMessage || "An error occurred.",
+      "",
+      ...args.metaMessages ? [...args.metaMessages, ""] : [],
+      ...docsUrl ? [`Docs: ${docsUrl}`] : [],
+      ...details ? [`Details: ${details}`] : [],
+      ...errorConfig.version ? [`Version: ${errorConfig.version}`] : []
+    ].join(`
+`);
+    super(message, args.cause ? { cause: args.cause } : undefined);
+    Object.defineProperty(this, "details", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "docsPath", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "metaMessages", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "shortMessage", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "version", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "BaseError"
+    });
+    this.details = details;
+    this.docsPath = docsPath;
+    this.metaMessages = args.metaMessages;
+    this.name = args.name ?? this.name;
+    this.shortMessage = shortMessage;
+    this.version = version;
+  }
+  walk(fn) {
+    return walk(this, fn);
+  }
+}
+function walk(err, fn) {
+  if (fn?.(err))
+    return err;
+  if (err && typeof err === "object" && "cause" in err && err.cause !== undefined)
+    return walk(err.cause, fn);
+  return fn ? null : err;
+}
+
+class AbiDecodingDataSizeTooSmallError extends BaseError {
+  constructor({ data, params, size: size2 }) {
+    super([`Data size of ${size2} bytes is too small for given parameters.`].join(`
+`), {
+      metaMessages: [
+        `Params: (${formatAbiParams(params, { includeName: true })})`,
+        `Data:   ${data} (${size2} bytes)`
+      ],
+      name: "AbiDecodingDataSizeTooSmallError"
+    });
+    Object.defineProperty(this, "data", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "params", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "size", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    this.data = data;
+    this.params = params;
+    this.size = size2;
+  }
+}
+
+class AbiDecodingZeroDataError extends BaseError {
+  constructor() {
+    super('Cannot decode zero data ("0x") with ABI parameters.', {
+      name: "AbiDecodingZeroDataError"
+    });
+  }
+}
+
+class AbiEncodingArrayLengthMismatchError extends BaseError {
+  constructor({ expectedLength, givenLength, type }) {
+    super([
+      `ABI encoding array length mismatch for type ${type}.`,
+      `Expected length: ${expectedLength}`,
+      `Given length: ${givenLength}`
+    ].join(`
+`), { name: "AbiEncodingArrayLengthMismatchError" });
+  }
+}
+
+class AbiEncodingBytesSizeMismatchError extends BaseError {
+  constructor({ expectedSize, value: value2 }) {
+    super(`Size of bytes "${value2}" (bytes${size(value2)}) does not match expected size (bytes${expectedSize}).`, { name: "AbiEncodingBytesSizeMismatchError" });
+  }
+}
+
+class AbiEncodingLengthMismatchError extends BaseError {
+  constructor({ expectedLength, givenLength }) {
+    super([
+      "ABI encoding params/values length mismatch.",
+      `Expected length (params): ${expectedLength}`,
+      `Given length (values): ${givenLength}`
+    ].join(`
+`), { name: "AbiEncodingLengthMismatchError" });
+  }
+}
+
+class AbiFunctionNotFoundError extends BaseError {
+  constructor(functionName, { docsPath } = {}) {
+    super([
+      `Function ${functionName ? `"${functionName}" ` : ""}not found on ABI.`,
+      "Make sure you are using the correct ABI and that the function exists on it."
+    ].join(`
+`), {
+      docsPath,
+      name: "AbiFunctionNotFoundError"
+    });
+  }
+}
+
+class AbiItemAmbiguityError extends BaseError {
+  constructor(x, y) {
+    super("Found ambiguous types in overloaded ABI items.", {
+      metaMessages: [
+        `\`${x.type}\` in \`${formatAbiItem(x.abiItem)}\`, and`,
+        `\`${y.type}\` in \`${formatAbiItem(y.abiItem)}\``,
+        "",
+        "These types encode differently and cannot be distinguished at runtime.",
+        "Remove one of the ambiguous items in the ABI."
+      ],
+      name: "AbiItemAmbiguityError"
+    });
+  }
+}
+
+class InvalidAbiEncodingTypeError extends BaseError {
+  constructor(type, { docsPath }) {
+    super([
+      `Type "${type}" is not a valid encoding type.`,
+      "Please provide a valid ABI type."
+    ].join(`
+`), { docsPath, name: "InvalidAbiEncodingType" });
+  }
+}
+
+class InvalidAbiDecodingTypeError extends BaseError {
+  constructor(type, { docsPath }) {
+    super([
+      `Type "${type}" is not a valid decoding type.`,
+      "Please provide a valid ABI type."
+    ].join(`
+`), { docsPath, name: "InvalidAbiDecodingType" });
+  }
+}
+
+class InvalidArrayError extends BaseError {
+  constructor(value2) {
+    super([`Value "${value2}" is not a valid array.`].join(`
+`), {
+      name: "InvalidArrayError"
+    });
+  }
+}
+
+class InvalidDefinitionTypeError extends BaseError {
+  constructor(type) {
+    super([
+      `"${type}" is not a valid definition type.`,
+      'Valid types: "function", "event", "error"'
+    ].join(`
+`), { name: "InvalidDefinitionTypeError" });
+  }
+}
+
+class InvalidAddressError extends BaseError {
+  constructor({ address }) {
+    super(`Address "${address}" is invalid.`, {
+      metaMessages: [
+        "- Address must be a hex value of 20 bytes (40 hex characters).",
+        "- Address must match its checksum counterpart."
+      ],
+      name: "InvalidAddressError"
+    });
+  }
+}
+
+class SliceOffsetOutOfBoundsError extends BaseError {
+  constructor({ offset, position, size: size2 }) {
+    super(`Slice ${position === "start" ? "starting" : "ending"} at offset "${offset}" is out-of-bounds (size: ${size2}).`, { name: "SliceOffsetOutOfBoundsError" });
+  }
+}
+
+class SizeExceedsPaddingSizeError extends BaseError {
+  constructor({ size: size2, targetSize, type }) {
+    super(`${type.charAt(0).toUpperCase()}${type.slice(1).toLowerCase()} size (${size2}) exceeds padding size (${targetSize}).`, { name: "SizeExceedsPaddingSizeError" });
+  }
+}
+function pad(hexOrBytes, { dir, size: size2 = 32 } = {}) {
+  if (typeof hexOrBytes === "string")
+    return padHex(hexOrBytes, { dir, size: size2 });
+  return padBytes(hexOrBytes, { dir, size: size2 });
+}
+function padHex(hex_, { dir, size: size2 = 32 } = {}) {
+  if (size2 === null)
+    return hex_;
+  const hex = hex_.replace("0x", "");
+  if (hex.length > size2 * 2)
+    throw new SizeExceedsPaddingSizeError({
+      size: Math.ceil(hex.length / 2),
+      targetSize: size2,
+      type: "hex"
+    });
+  return `0x${hex[dir === "right" ? "padEnd" : "padStart"](size2 * 2, "0")}`;
+}
+function padBytes(bytes, { dir, size: size2 = 32 } = {}) {
+  if (size2 === null)
+    return bytes;
+  if (bytes.length > size2)
+    throw new SizeExceedsPaddingSizeError({
+      size: bytes.length,
+      targetSize: size2,
+      type: "bytes"
+    });
+  const paddedBytes = new Uint8Array(size2);
+  for (let i2 = 0;i2 < size2; i2++) {
+    const padEnd = dir === "right";
+    paddedBytes[padEnd ? i2 : size2 - i2 - 1] = bytes[padEnd ? i2 : bytes.length - i2 - 1];
+  }
+  return paddedBytes;
+}
+
+class IntegerOutOfRangeError extends BaseError {
+  constructor({ max, min, signed, size: size2, value: value2 }) {
+    super(`Number "${value2}" is not in safe ${size2 ? `${size2 * 8}-bit ${signed ? "signed" : "unsigned"} ` : ""}integer range ${max ? `(${min} to ${max})` : `(above ${min})`}`, { name: "IntegerOutOfRangeError" });
+  }
+}
+
+class InvalidBytesBooleanError extends BaseError {
+  constructor(bytes) {
+    super(`Bytes value "${bytes}" is not a valid boolean. The bytes array must contain a single byte of either a 0 or 1 value.`, {
+      name: "InvalidBytesBooleanError"
+    });
+  }
+}
+
+class SizeOverflowError extends BaseError {
+  constructor({ givenSize, maxSize }) {
+    super(`Size cannot exceed ${maxSize} bytes. Given size: ${givenSize} bytes.`, { name: "SizeOverflowError" });
+  }
+}
+function trim(hexOrBytes, { dir = "left" } = {}) {
+  let data = typeof hexOrBytes === "string" ? hexOrBytes.replace("0x", "") : hexOrBytes;
+  let sliceLength = 0;
+  for (let i2 = 0;i2 < data.length - 1; i2++) {
+    if (data[dir === "left" ? i2 : data.length - i2 - 1].toString() === "0")
+      sliceLength++;
+    else
+      break;
+  }
+  data = dir === "left" ? data.slice(sliceLength) : data.slice(0, data.length - sliceLength);
+  if (typeof hexOrBytes === "string") {
+    if (data.length === 1 && dir === "right")
+      data = `${data}0`;
+    return `0x${data.length % 2 === 1 ? `0${data}` : data}`;
+  }
+  return data;
+}
+function assertSize2(hexOrBytes, { size: size2 }) {
+  if (size(hexOrBytes) > size2)
+    throw new SizeOverflowError({
+      givenSize: size(hexOrBytes),
+      maxSize: size2
+    });
+}
+function hexToBigInt(hex, opts = {}) {
+  const { signed } = opts;
+  if (opts.size)
+    assertSize2(hex, { size: opts.size });
+  const value2 = BigInt(hex);
+  if (!signed)
+    return value2;
+  const size2 = (hex.length - 2) / 2;
+  const max = (1n << BigInt(size2) * 8n - 1n) - 1n;
+  if (value2 <= max)
+    return value2;
+  return value2 - BigInt(`0x${"f".padStart(size2 * 2, "f")}`) - 1n;
+}
+function hexToNumber(hex, opts = {}) {
+  return Number(hexToBigInt(hex, opts));
+}
+var hexes = /* @__PURE__ */ Array.from({ length: 256 }, (_v, i2) => i2.toString(16).padStart(2, "0"));
+function toHex(value2, opts = {}) {
+  if (typeof value2 === "number" || typeof value2 === "bigint")
+    return numberToHex(value2, opts);
+  if (typeof value2 === "string") {
+    return stringToHex(value2, opts);
+  }
+  if (typeof value2 === "boolean")
+    return boolToHex(value2, opts);
+  return bytesToHex2(value2, opts);
+}
+function boolToHex(value2, opts = {}) {
+  const hex = `0x${Number(value2)}`;
+  if (typeof opts.size === "number") {
+    assertSize2(hex, { size: opts.size });
+    return pad(hex, { size: opts.size });
+  }
+  return hex;
+}
+function bytesToHex2(value2, opts = {}) {
+  let string = "";
+  for (let i2 = 0;i2 < value2.length; i2++) {
+    string += hexes[value2[i2]];
+  }
+  const hex = `0x${string}`;
+  if (typeof opts.size === "number") {
+    assertSize2(hex, { size: opts.size });
+    return pad(hex, { dir: "right", size: opts.size });
+  }
+  return hex;
+}
+function numberToHex(value_, opts = {}) {
+  const { signed, size: size2 } = opts;
+  const value2 = BigInt(value_);
+  let maxValue;
+  if (size2) {
+    if (signed)
+      maxValue = (1n << BigInt(size2) * 8n - 1n) - 1n;
+    else
+      maxValue = 2n ** (BigInt(size2) * 8n) - 1n;
+  } else if (typeof value_ === "number") {
+    maxValue = BigInt(Number.MAX_SAFE_INTEGER);
+  }
+  const minValue = typeof maxValue === "bigint" && signed ? -maxValue - 1n : 0;
+  if (maxValue && value2 > maxValue || value2 < minValue) {
+    const suffix = typeof value_ === "bigint" ? "n" : "";
+    throw new IntegerOutOfRangeError({
+      max: maxValue ? `${maxValue}${suffix}` : undefined,
+      min: `${minValue}${suffix}`,
+      signed,
+      size: size2,
+      value: `${value_}${suffix}`
+    });
+  }
+  const hex = `0x${(signed && value2 < 0 ? (1n << BigInt(size2 * 8)) + BigInt(value2) : value2).toString(16)}`;
+  if (size2)
+    return pad(hex, { size: size2 });
+  return hex;
+}
+var encoder = /* @__PURE__ */ new TextEncoder;
+function stringToHex(value_, opts = {}) {
+  const value2 = encoder.encode(value_);
+  return bytesToHex2(value2, opts);
+}
+var encoder2 = /* @__PURE__ */ new TextEncoder;
+function toBytes(value2, opts = {}) {
+  if (typeof value2 === "number" || typeof value2 === "bigint")
+    return numberToBytes(value2, opts);
+  if (typeof value2 === "boolean")
+    return boolToBytes(value2, opts);
+  if (isHex(value2))
+    return hexToBytes2(value2, opts);
+  return stringToBytes(value2, opts);
+}
+function boolToBytes(value2, opts = {}) {
+  const bytes = new Uint8Array(1);
+  bytes[0] = Number(value2);
+  if (typeof opts.size === "number") {
+    assertSize2(bytes, { size: opts.size });
+    return pad(bytes, { size: opts.size });
+  }
+  return bytes;
+}
+var charCodeMap = {
+  zero: 48,
+  nine: 57,
+  A: 65,
+  F: 70,
+  a: 97,
+  f: 102
+};
+function charCodeToBase16(char) {
+  if (char >= charCodeMap.zero && char <= charCodeMap.nine)
+    return char - charCodeMap.zero;
+  if (char >= charCodeMap.A && char <= charCodeMap.F)
+    return char - (charCodeMap.A - 10);
+  if (char >= charCodeMap.a && char <= charCodeMap.f)
+    return char - (charCodeMap.a - 10);
+  return;
+}
+function hexToBytes2(hex_, opts = {}) {
+  let hex = hex_;
+  if (opts.size) {
+    assertSize2(hex, { size: opts.size });
+    hex = pad(hex, { dir: "right", size: opts.size });
+  }
+  let hexString = hex.slice(2);
+  if (hexString.length % 2)
+    hexString = `0${hexString}`;
+  const length = hexString.length / 2;
+  const bytes = new Uint8Array(length);
+  for (let index = 0, j = 0;index < length; index++) {
+    const nibbleLeft = charCodeToBase16(hexString.charCodeAt(j++));
+    const nibbleRight = charCodeToBase16(hexString.charCodeAt(j++));
+    if (nibbleLeft === undefined || nibbleRight === undefined) {
+      throw new BaseError(`Invalid byte sequence ("${hexString[j - 2]}${hexString[j - 1]}" in "${hexString}").`);
+    }
+    bytes[index] = nibbleLeft * 16 + nibbleRight;
+  }
+  return bytes;
+}
+function numberToBytes(value2, opts) {
+  const hex = numberToHex(value2, opts);
+  return hexToBytes2(hex);
+}
+function stringToBytes(value2, opts = {}) {
+  const bytes = encoder2.encode(value2);
+  if (typeof opts.size === "number") {
+    assertSize2(bytes, { size: opts.size });
+    return pad(bytes, { dir: "right", size: opts.size });
+  }
+  return bytes;
+}
+var U32_MASK64 = /* @__PURE__ */ BigInt(2 ** 32 - 1);
+var _32n = /* @__PURE__ */ BigInt(32);
+function fromBig(n, le = false) {
+  if (le)
+    return { h: Number(n & U32_MASK64), l: Number(n >> _32n & U32_MASK64) };
+  return { h: Number(n >> _32n & U32_MASK64) | 0, l: Number(n & U32_MASK64) | 0 };
+}
+function split(lst, le = false) {
+  const len2 = lst.length;
+  let Ah = new Uint32Array(len2);
+  let Al = new Uint32Array(len2);
+  for (let i2 = 0;i2 < len2; i2++) {
+    const { h, l } = fromBig(lst[i2], le);
+    [Ah[i2], Al[i2]] = [h, l];
+  }
+  return [Ah, Al];
+}
+var rotlSH = (h, l, s) => h << s | l >>> 32 - s;
+var rotlSL = (h, l, s) => l << s | h >>> 32 - s;
+var rotlBH = (h, l, s) => l << s - 32 | h >>> 64 - s;
+var rotlBL = (h, l, s) => h << s - 32 | l >>> 64 - s;
+/*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) */
+function isBytes(a) {
+  return a instanceof Uint8Array || ArrayBuffer.isView(a) && a.constructor.name === "Uint8Array";
+}
+function anumber(n) {
+  if (!Number.isSafeInteger(n) || n < 0)
+    throw new Error("positive integer expected, got " + n);
+}
+function abytes(b, ...lengths) {
+  if (!isBytes(b))
+    throw new Error("Uint8Array expected");
+  if (lengths.length > 0 && !lengths.includes(b.length))
+    throw new Error("Uint8Array expected of length " + lengths + ", got length=" + b.length);
+}
+function aexists(instance, checkFinished = true) {
+  if (instance.destroyed)
+    throw new Error("Hash instance has been destroyed");
+  if (checkFinished && instance.finished)
+    throw new Error("Hash#digest() has already been called");
+}
+function aoutput(out, instance) {
+  abytes(out);
+  const min = instance.outputLen;
+  if (out.length < min) {
+    throw new Error("digestInto() expects output buffer of length at least " + min);
+  }
+}
+function u32(arr) {
+  return new Uint32Array(arr.buffer, arr.byteOffset, Math.floor(arr.byteLength / 4));
+}
+function clean(...arrays) {
+  for (let i2 = 0;i2 < arrays.length; i2++) {
+    arrays[i2].fill(0);
+  }
+}
+var isLE = /* @__PURE__ */ (() => new Uint8Array(new Uint32Array([287454020]).buffer)[0] === 68)();
+function byteSwap(word) {
+  return word << 24 & 4278190080 | word << 8 & 16711680 | word >>> 8 & 65280 | word >>> 24 & 255;
+}
+function byteSwap32(arr) {
+  for (let i2 = 0;i2 < arr.length; i2++) {
+    arr[i2] = byteSwap(arr[i2]);
+  }
+  return arr;
+}
+var swap32IfBE = isLE ? (u) => u : byteSwap32;
+function utf8ToBytes2(str) {
+  if (typeof str !== "string")
+    throw new Error("string expected");
+  return new Uint8Array(new TextEncoder().encode(str));
+}
+function toBytes2(data) {
+  if (typeof data === "string")
+    data = utf8ToBytes2(data);
+  abytes(data);
+  return data;
+}
+
+class Hash {
+}
+function createHasher(hashCons) {
+  const hashC = (msg) => hashCons().update(toBytes2(msg)).digest();
+  const tmp = hashCons();
+  hashC.outputLen = tmp.outputLen;
+  hashC.blockLen = tmp.blockLen;
+  hashC.create = () => hashCons();
+  return hashC;
+}
+var _0n = BigInt(0);
+var _1n = BigInt(1);
+var _2n = BigInt(2);
+var _7n = BigInt(7);
+var _256n = BigInt(256);
+var _0x71n = BigInt(113);
+var SHA3_PI = [];
+var SHA3_ROTL = [];
+var _SHA3_IOTA = [];
+for (let round = 0, R = _1n, x = 1, y = 0;round < 24; round++) {
+  [x, y] = [y, (2 * x + 3 * y) % 5];
+  SHA3_PI.push(2 * (5 * y + x));
+  SHA3_ROTL.push((round + 1) * (round + 2) / 2 % 64);
+  let t = _0n;
+  for (let j = 0;j < 7; j++) {
+    R = (R << _1n ^ (R >> _7n) * _0x71n) % _256n;
+    if (R & _2n)
+      t ^= _1n << (_1n << /* @__PURE__ */ BigInt(j)) - _1n;
+  }
+  _SHA3_IOTA.push(t);
+}
+var IOTAS = split(_SHA3_IOTA, true);
+var SHA3_IOTA_H = IOTAS[0];
+var SHA3_IOTA_L = IOTAS[1];
+var rotlH = (h, l, s) => s > 32 ? rotlBH(h, l, s) : rotlSH(h, l, s);
+var rotlL = (h, l, s) => s > 32 ? rotlBL(h, l, s) : rotlSL(h, l, s);
+function keccakP(s, rounds = 24) {
+  const B = new Uint32Array(5 * 2);
+  for (let round = 24 - rounds;round < 24; round++) {
+    for (let x = 0;x < 10; x++)
+      B[x] = s[x] ^ s[x + 10] ^ s[x + 20] ^ s[x + 30] ^ s[x + 40];
+    for (let x = 0;x < 10; x += 2) {
+      const idx1 = (x + 8) % 10;
+      const idx0 = (x + 2) % 10;
+      const B0 = B[idx0];
+      const B1 = B[idx0 + 1];
+      const Th = rotlH(B0, B1, 1) ^ B[idx1];
+      const Tl = rotlL(B0, B1, 1) ^ B[idx1 + 1];
+      for (let y = 0;y < 50; y += 10) {
+        s[x + y] ^= Th;
+        s[x + y + 1] ^= Tl;
+      }
+    }
+    let curH = s[2];
+    let curL = s[3];
+    for (let t = 0;t < 24; t++) {
+      const shift = SHA3_ROTL[t];
+      const Th = rotlH(curH, curL, shift);
+      const Tl = rotlL(curH, curL, shift);
+      const PI = SHA3_PI[t];
+      curH = s[PI];
+      curL = s[PI + 1];
+      s[PI] = Th;
+      s[PI + 1] = Tl;
+    }
+    for (let y = 0;y < 50; y += 10) {
+      for (let x = 0;x < 10; x++)
+        B[x] = s[y + x];
+      for (let x = 0;x < 10; x++)
+        s[y + x] ^= ~B[(x + 2) % 10] & B[(x + 4) % 10];
+    }
+    s[0] ^= SHA3_IOTA_H[round];
+    s[1] ^= SHA3_IOTA_L[round];
+  }
+  clean(B);
+}
+
+class Keccak extends Hash {
+  constructor(blockLen, suffix, outputLen, enableXOF = false, rounds = 24) {
+    super();
+    this.pos = 0;
+    this.posOut = 0;
+    this.finished = false;
+    this.destroyed = false;
+    this.enableXOF = false;
+    this.blockLen = blockLen;
+    this.suffix = suffix;
+    this.outputLen = outputLen;
+    this.enableXOF = enableXOF;
+    this.rounds = rounds;
+    anumber(outputLen);
+    if (!(0 < blockLen && blockLen < 200))
+      throw new Error("only keccak-f1600 function is supported");
+    this.state = new Uint8Array(200);
+    this.state32 = u32(this.state);
+  }
+  clone() {
+    return this._cloneInto();
+  }
+  keccak() {
+    swap32IfBE(this.state32);
+    keccakP(this.state32, this.rounds);
+    swap32IfBE(this.state32);
+    this.posOut = 0;
+    this.pos = 0;
+  }
+  update(data) {
+    aexists(this);
+    data = toBytes2(data);
+    abytes(data);
+    const { blockLen, state } = this;
+    const len2 = data.length;
+    for (let pos = 0;pos < len2; ) {
+      const take = Math.min(blockLen - this.pos, len2 - pos);
+      for (let i2 = 0;i2 < take; i2++)
+        state[this.pos++] ^= data[pos++];
+      if (this.pos === blockLen)
+        this.keccak();
+    }
+    return this;
+  }
+  finish() {
+    if (this.finished)
+      return;
+    this.finished = true;
+    const { state, suffix, pos, blockLen } = this;
+    state[pos] ^= suffix;
+    if ((suffix & 128) !== 0 && pos === blockLen - 1)
+      this.keccak();
+    state[blockLen - 1] ^= 128;
+    this.keccak();
+  }
+  writeInto(out) {
+    aexists(this, false);
+    abytes(out);
+    this.finish();
+    const bufferOut = this.state;
+    const { blockLen } = this;
+    for (let pos = 0, len2 = out.length;pos < len2; ) {
+      if (this.posOut >= blockLen)
+        this.keccak();
+      const take = Math.min(blockLen - this.posOut, len2 - pos);
+      out.set(bufferOut.subarray(this.posOut, this.posOut + take), pos);
+      this.posOut += take;
+      pos += take;
+    }
+    return out;
+  }
+  xofInto(out) {
+    if (!this.enableXOF)
+      throw new Error("XOF is not possible for this instance");
+    return this.writeInto(out);
+  }
+  xof(bytes) {
+    anumber(bytes);
+    return this.xofInto(new Uint8Array(bytes));
+  }
+  digestInto(out) {
+    aoutput(out, this);
+    if (this.finished)
+      throw new Error("digest() was already called");
+    this.writeInto(out);
+    this.destroy();
+    return out;
+  }
+  digest() {
+    return this.digestInto(new Uint8Array(this.outputLen));
+  }
+  destroy() {
+    this.destroyed = true;
+    clean(this.state);
+  }
+  _cloneInto(to) {
+    const { blockLen, suffix, outputLen, rounds, enableXOF } = this;
+    to || (to = new Keccak(blockLen, suffix, outputLen, enableXOF, rounds));
+    to.state32.set(this.state32);
+    to.pos = this.pos;
+    to.posOut = this.posOut;
+    to.finished = this.finished;
+    to.rounds = rounds;
+    to.suffix = suffix;
+    to.outputLen = outputLen;
+    to.enableXOF = enableXOF;
+    to.destroyed = this.destroyed;
+    return to;
+  }
+}
+var gen = (suffix, blockLen, outputLen) => createHasher(() => new Keccak(blockLen, suffix, outputLen));
+var keccak_256 = /* @__PURE__ */ (() => gen(1, 136, 256 / 8))();
+function keccak256(value2, to_) {
+  const to = to_ || "hex";
+  const bytes = keccak_256(isHex(value2, { strict: false }) ? toBytes(value2) : value2);
+  if (to === "bytes")
+    return bytes;
+  return toHex(bytes);
+}
+
+class LruMap extends Map {
+  constructor(size2) {
+    super();
+    Object.defineProperty(this, "maxSize", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    this.maxSize = size2;
+  }
+  get(key) {
+    const value2 = super.get(key);
+    if (super.has(key) && value2 !== undefined) {
+      this.delete(key);
+      super.set(key, value2);
+    }
+    return value2;
+  }
+  set(key, value2) {
+    super.set(key, value2);
+    if (this.maxSize && this.size > this.maxSize) {
+      const firstKey = this.keys().next().value;
+      if (firstKey)
+        this.delete(firstKey);
+    }
+    return this;
+  }
+}
+var addressRegex = /^0x[a-fA-F0-9]{40}$/;
+var isAddressCache = /* @__PURE__ */ new LruMap(8192);
+function isAddress(address, options) {
+  const { strict = true } = options ?? {};
+  const cacheKey = `${address}.${strict}`;
+  if (isAddressCache.has(cacheKey))
+    return isAddressCache.get(cacheKey);
+  const result = (() => {
+    if (!addressRegex.test(address))
+      return false;
+    if (address.toLowerCase() === address)
+      return true;
+    if (strict)
+      return checksumAddress(address) === address;
+    return true;
+  })();
+  isAddressCache.set(cacheKey, result);
+  return result;
+}
+var checksumAddressCache = /* @__PURE__ */ new LruMap(8192);
+function checksumAddress(address_, chainId) {
+  if (checksumAddressCache.has(`${address_}.${chainId}`))
+    return checksumAddressCache.get(`${address_}.${chainId}`);
+  const hexAddress = chainId ? `${chainId}${address_.toLowerCase()}` : address_.substring(2).toLowerCase();
+  const hash = keccak256(stringToBytes(hexAddress), "bytes");
+  const address = (chainId ? hexAddress.substring(`${chainId}0x`.length) : hexAddress).split("");
+  for (let i2 = 0;i2 < 40; i2 += 2) {
+    if (hash[i2 >> 1] >> 4 >= 8 && address[i2]) {
+      address[i2] = address[i2].toUpperCase();
+    }
+    if ((hash[i2 >> 1] & 15) >= 8 && address[i2 + 1]) {
+      address[i2 + 1] = address[i2 + 1].toUpperCase();
+    }
+  }
+  const result = `0x${address.join("")}`;
+  checksumAddressCache.set(`${address_}.${chainId}`, result);
+  return result;
+}
+
+class NegativeOffsetError extends BaseError {
+  constructor({ offset }) {
+    super(`Offset \`${offset}\` cannot be negative.`, {
+      name: "NegativeOffsetError"
+    });
+  }
+}
+
+class PositionOutOfBoundsError extends BaseError {
+  constructor({ length, position }) {
+    super(`Position \`${position}\` is out of bounds (\`0 < position < ${length}\`).`, { name: "PositionOutOfBoundsError" });
+  }
+}
+
+class RecursiveReadLimitExceededError extends BaseError {
+  constructor({ count, limit }) {
+    super(`Recursive read limit of \`${limit}\` exceeded (recursive read count: \`${count}\`).`, { name: "RecursiveReadLimitExceededError" });
+  }
+}
+var staticCursor = {
+  bytes: new Uint8Array,
+  dataView: new DataView(new ArrayBuffer(0)),
+  position: 0,
+  positionReadCount: new Map,
+  recursiveReadCount: 0,
+  recursiveReadLimit: Number.POSITIVE_INFINITY,
+  assertReadLimit() {
+    if (this.recursiveReadCount >= this.recursiveReadLimit)
+      throw new RecursiveReadLimitExceededError({
+        count: this.recursiveReadCount + 1,
+        limit: this.recursiveReadLimit
+      });
+  },
+  assertPosition(position) {
+    if (position < 0 || position > this.bytes.length - 1)
+      throw new PositionOutOfBoundsError({
+        length: this.bytes.length,
+        position
+      });
+  },
+  decrementPosition(offset) {
+    if (offset < 0)
+      throw new NegativeOffsetError({ offset });
+    const position = this.position - offset;
+    this.assertPosition(position);
+    this.position = position;
+  },
+  getReadCount(position) {
+    return this.positionReadCount.get(position || this.position) || 0;
+  },
+  incrementPosition(offset) {
+    if (offset < 0)
+      throw new NegativeOffsetError({ offset });
+    const position = this.position + offset;
+    this.assertPosition(position);
+    this.position = position;
+  },
+  inspectByte(position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position);
+    return this.bytes[position];
+  },
+  inspectBytes(length, position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position + length - 1);
+    return this.bytes.subarray(position, position + length);
+  },
+  inspectUint8(position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position);
+    return this.bytes[position];
+  },
+  inspectUint16(position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position + 1);
+    return this.dataView.getUint16(position);
+  },
+  inspectUint24(position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position + 2);
+    return (this.dataView.getUint16(position) << 8) + this.dataView.getUint8(position + 2);
+  },
+  inspectUint32(position_) {
+    const position = position_ ?? this.position;
+    this.assertPosition(position + 3);
+    return this.dataView.getUint32(position);
+  },
+  pushByte(byte) {
+    this.assertPosition(this.position);
+    this.bytes[this.position] = byte;
+    this.position++;
+  },
+  pushBytes(bytes) {
+    this.assertPosition(this.position + bytes.length - 1);
+    this.bytes.set(bytes, this.position);
+    this.position += bytes.length;
+  },
+  pushUint8(value2) {
+    this.assertPosition(this.position);
+    this.bytes[this.position] = value2;
+    this.position++;
+  },
+  pushUint16(value2) {
+    this.assertPosition(this.position + 1);
+    this.dataView.setUint16(this.position, value2);
+    this.position += 2;
+  },
+  pushUint24(value2) {
+    this.assertPosition(this.position + 2);
+    this.dataView.setUint16(this.position, value2 >> 8);
+    this.dataView.setUint8(this.position + 2, value2 & ~4294967040);
+    this.position += 3;
+  },
+  pushUint32(value2) {
+    this.assertPosition(this.position + 3);
+    this.dataView.setUint32(this.position, value2);
+    this.position += 4;
+  },
+  readByte() {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectByte();
+    this.position++;
+    return value2;
+  },
+  readBytes(length, size2) {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectBytes(length);
+    this.position += size2 ?? length;
+    return value2;
+  },
+  readUint8() {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectUint8();
+    this.position += 1;
+    return value2;
+  },
+  readUint16() {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectUint16();
+    this.position += 2;
+    return value2;
+  },
+  readUint24() {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectUint24();
+    this.position += 3;
+    return value2;
+  },
+  readUint32() {
+    this.assertReadLimit();
+    this._touch();
+    const value2 = this.inspectUint32();
+    this.position += 4;
+    return value2;
+  },
+  get remaining() {
+    return this.bytes.length - this.position;
+  },
+  setPosition(position) {
+    const oldPosition = this.position;
+    this.assertPosition(position);
+    this.position = position;
+    return () => this.position = oldPosition;
+  },
+  _touch() {
+    if (this.recursiveReadLimit === Number.POSITIVE_INFINITY)
+      return;
+    const count = this.getReadCount();
+    this.positionReadCount.set(this.position, count + 1);
+    if (count > 0)
+      this.recursiveReadCount++;
+  }
+};
+function createCursor(bytes, { recursiveReadLimit = 8192 } = {}) {
+  const cursor = Object.create(staticCursor);
+  cursor.bytes = bytes;
+  cursor.dataView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  cursor.positionReadCount = new Map;
+  cursor.recursiveReadLimit = recursiveReadLimit;
+  return cursor;
+}
+function slice(value2, start, end, { strict } = {}) {
+  if (isHex(value2, { strict: false }))
+    return sliceHex(value2, start, end, {
+      strict
+    });
+  return sliceBytes(value2, start, end, {
+    strict
+  });
+}
+function assertStartOffset(value2, start) {
+  if (typeof start === "number" && start > 0 && start > size(value2) - 1)
+    throw new SliceOffsetOutOfBoundsError({
+      offset: start,
+      position: "start",
+      size: size(value2)
+    });
+}
+function assertEndOffset(value2, start, end) {
+  if (typeof start === "number" && typeof end === "number" && size(value2) !== end - start) {
+    throw new SliceOffsetOutOfBoundsError({
+      offset: end,
+      position: "end",
+      size: size(value2)
+    });
+  }
+}
+function sliceBytes(value_, start, end, { strict } = {}) {
+  assertStartOffset(value_, start);
+  const value2 = value_.slice(start, end);
+  if (strict)
+    assertEndOffset(value2, start, end);
+  return value2;
+}
+function sliceHex(value_, start, end, { strict } = {}) {
+  assertStartOffset(value_, start);
+  const value2 = `0x${value_.replace("0x", "").slice((start ?? 0) * 2, (end ?? value_.length) * 2)}`;
+  if (strict)
+    assertEndOffset(value2, start, end);
+  return value2;
+}
+function bytesToBigInt(bytes, opts = {}) {
+  if (typeof opts.size !== "undefined")
+    assertSize2(bytes, { size: opts.size });
+  const hex = bytesToHex2(bytes, opts);
+  return hexToBigInt(hex, opts);
+}
+function bytesToBool(bytes_, opts = {}) {
+  let bytes = bytes_;
+  if (typeof opts.size !== "undefined") {
+    assertSize2(bytes, { size: opts.size });
+    bytes = trim(bytes);
+  }
+  if (bytes.length > 1 || bytes[0] > 1)
+    throw new InvalidBytesBooleanError(bytes);
+  return Boolean(bytes[0]);
+}
+function bytesToNumber(bytes, opts = {}) {
+  if (typeof opts.size !== "undefined")
+    assertSize2(bytes, { size: opts.size });
+  const hex = bytesToHex2(bytes, opts);
+  return hexToNumber(hex, opts);
+}
+function bytesToString(bytes_, opts = {}) {
+  let bytes = bytes_;
+  if (typeof opts.size !== "undefined") {
+    assertSize2(bytes, { size: opts.size });
+    bytes = trim(bytes, { dir: "right" });
+  }
+  return new TextDecoder().decode(bytes);
+}
+function concat(values) {
+  if (typeof values[0] === "string")
+    return concatHex(values);
+  return concatBytes(values);
+}
+function concatBytes(values) {
+  let length = 0;
+  for (const arr of values) {
+    length += arr.length;
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const arr of values) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
+function concatHex(values) {
+  return `0x${values.reduce((acc, x) => acc + x.replace("0x", ""), "")}`;
+}
+var integerRegex = /^(u?int)(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/;
+function encodeAbiParameters(params, values) {
+  if (params.length !== values.length)
+    throw new AbiEncodingLengthMismatchError({
+      expectedLength: params.length,
+      givenLength: values.length
+    });
+  const preparedParams = prepareParams({
+    params,
+    values
+  });
+  const data = encodeParams(preparedParams);
+  if (data.length === 0)
+    return "0x";
+  return data;
+}
+function prepareParams({ params, values }) {
+  const preparedParams = [];
+  for (let i2 = 0;i2 < params.length; i2++) {
+    preparedParams.push(prepareParam({ param: params[i2], value: values[i2] }));
+  }
+  return preparedParams;
+}
+function prepareParam({ param, value: value2 }) {
+  const arrayComponents = getArrayComponents(param.type);
+  if (arrayComponents) {
+    const [length, type] = arrayComponents;
+    return encodeArray(value2, { length, param: { ...param, type } });
+  }
+  if (param.type === "tuple") {
+    return encodeTuple(value2, {
+      param
+    });
+  }
+  if (param.type === "address") {
+    return encodeAddress(value2);
+  }
+  if (param.type === "bool") {
+    return encodeBool(value2);
+  }
+  if (param.type.startsWith("uint") || param.type.startsWith("int")) {
+    const signed = param.type.startsWith("int");
+    const [, , size2 = "256"] = integerRegex.exec(param.type) ?? [];
+    return encodeNumber(value2, {
+      signed,
+      size: Number(size2)
+    });
+  }
+  if (param.type.startsWith("bytes")) {
+    return encodeBytes(value2, { param });
+  }
+  if (param.type === "string") {
+    return encodeString(value2);
+  }
+  throw new InvalidAbiEncodingTypeError(param.type, {
+    docsPath: "/docs/contract/encodeAbiParameters"
+  });
+}
+function encodeParams(preparedParams) {
+  let staticSize = 0;
+  for (let i2 = 0;i2 < preparedParams.length; i2++) {
+    const { dynamic, encoded } = preparedParams[i2];
+    if (dynamic)
+      staticSize += 32;
+    else
+      staticSize += size(encoded);
+  }
+  const staticParams = [];
+  const dynamicParams = [];
+  let dynamicSize = 0;
+  for (let i2 = 0;i2 < preparedParams.length; i2++) {
+    const { dynamic, encoded } = preparedParams[i2];
+    if (dynamic) {
+      staticParams.push(numberToHex(staticSize + dynamicSize, { size: 32 }));
+      dynamicParams.push(encoded);
+      dynamicSize += size(encoded);
+    } else {
+      staticParams.push(encoded);
+    }
+  }
+  return concat([...staticParams, ...dynamicParams]);
+}
+function encodeAddress(value2) {
+  if (!isAddress(value2))
+    throw new InvalidAddressError({ address: value2 });
+  return { dynamic: false, encoded: padHex(value2.toLowerCase()) };
+}
+function encodeArray(value2, { length, param }) {
+  const dynamic = length === null;
+  if (!Array.isArray(value2))
+    throw new InvalidArrayError(value2);
+  if (!dynamic && value2.length !== length)
+    throw new AbiEncodingArrayLengthMismatchError({
+      expectedLength: length,
+      givenLength: value2.length,
+      type: `${param.type}[${length}]`
+    });
+  let dynamicChild = false;
+  const preparedParams = [];
+  for (let i2 = 0;i2 < value2.length; i2++) {
+    const preparedParam = prepareParam({ param, value: value2[i2] });
+    if (preparedParam.dynamic)
+      dynamicChild = true;
+    preparedParams.push(preparedParam);
+  }
+  if (dynamic || dynamicChild) {
+    const data = encodeParams(preparedParams);
+    if (dynamic) {
+      const length2 = numberToHex(preparedParams.length, { size: 32 });
+      return {
+        dynamic: true,
+        encoded: preparedParams.length > 0 ? concat([length2, data]) : length2
+      };
+    }
+    if (dynamicChild)
+      return { dynamic: true, encoded: data };
+  }
+  return {
+    dynamic: false,
+    encoded: concat(preparedParams.map(({ encoded }) => encoded))
+  };
+}
+function encodeBytes(value2, { param }) {
+  const [, paramSize] = param.type.split("bytes");
+  const bytesSize = size(value2);
+  if (!paramSize) {
+    let value_ = value2;
+    if (bytesSize % 32 !== 0)
+      value_ = padHex(value_, {
+        dir: "right",
+        size: Math.ceil((value2.length - 2) / 2 / 32) * 32
+      });
+    return {
+      dynamic: true,
+      encoded: concat([padHex(numberToHex(bytesSize, { size: 32 })), value_])
+    };
+  }
+  if (bytesSize !== Number.parseInt(paramSize))
+    throw new AbiEncodingBytesSizeMismatchError({
+      expectedSize: Number.parseInt(paramSize),
+      value: value2
+    });
+  return { dynamic: false, encoded: padHex(value2, { dir: "right" }) };
+}
+function encodeBool(value2) {
+  if (typeof value2 !== "boolean")
+    throw new BaseError(`Invalid boolean value: "${value2}" (type: ${typeof value2}). Expected: \`true\` or \`false\`.`);
+  return { dynamic: false, encoded: padHex(boolToHex(value2)) };
+}
+function encodeNumber(value2, { signed, size: size2 = 256 }) {
+  if (typeof size2 === "number") {
+    const max = 2n ** (BigInt(size2) - (signed ? 1n : 0n)) - 1n;
+    const min = signed ? -max - 1n : 0n;
+    if (value2 > max || value2 < min)
+      throw new IntegerOutOfRangeError({
+        max: max.toString(),
+        min: min.toString(),
+        signed,
+        size: size2 / 8,
+        value: value2.toString()
+      });
+  }
+  return {
+    dynamic: false,
+    encoded: numberToHex(value2, {
+      size: 32,
+      signed
+    })
+  };
+}
+function encodeString(value2) {
+  const hexValue = stringToHex(value2);
+  const partsLength = Math.ceil(size(hexValue) / 32);
+  const parts = [];
+  for (let i2 = 0;i2 < partsLength; i2++) {
+    parts.push(padHex(slice(hexValue, i2 * 32, (i2 + 1) * 32), {
+      dir: "right"
+    }));
+  }
+  return {
+    dynamic: true,
+    encoded: concat([
+      padHex(numberToHex(size(hexValue), { size: 32 })),
+      ...parts
+    ])
+  };
+}
+function encodeTuple(value2, { param }) {
+  let dynamic = false;
+  const preparedParams = [];
+  for (let i2 = 0;i2 < param.components.length; i2++) {
+    const param_ = param.components[i2];
+    const index = Array.isArray(value2) ? i2 : param_.name;
+    const preparedParam = prepareParam({
+      param: param_,
+      value: value2[index]
+    });
+    preparedParams.push(preparedParam);
+    if (preparedParam.dynamic)
+      dynamic = true;
+  }
+  return {
+    dynamic,
+    encoded: dynamic ? encodeParams(preparedParams) : concat(preparedParams.map(({ encoded }) => encoded))
+  };
+}
+function getArrayComponents(type) {
+  const matches = type.match(/^(.*)\[(\d+)?\]$/);
+  return matches ? [matches[2] ? Number(matches[2]) : null, matches[1]] : undefined;
+}
+function decodeAbiParameters(params, data) {
+  const bytes = typeof data === "string" ? hexToBytes2(data) : data;
+  const cursor = createCursor(bytes);
+  if (size(bytes) === 0 && params.length > 0)
+    throw new AbiDecodingZeroDataError;
+  if (size(data) && size(data) < 32)
+    throw new AbiDecodingDataSizeTooSmallError({
+      data: typeof data === "string" ? data : bytesToHex2(data),
+      params,
+      size: size(data)
+    });
+  let consumed = 0;
+  const values = [];
+  for (let i2 = 0;i2 < params.length; ++i2) {
+    const param = params[i2];
+    cursor.setPosition(consumed);
+    const [data2, consumed_] = decodeParameter(cursor, param, {
+      staticPosition: 0
+    });
+    consumed += consumed_;
+    values.push(data2);
+  }
+  return values;
+}
+function decodeParameter(cursor, param, { staticPosition }) {
+  const arrayComponents = getArrayComponents(param.type);
+  if (arrayComponents) {
+    const [length, type] = arrayComponents;
+    return decodeArray(cursor, { ...param, type }, { length, staticPosition });
+  }
+  if (param.type === "tuple")
+    return decodeTuple(cursor, param, { staticPosition });
+  if (param.type === "address")
+    return decodeAddress(cursor);
+  if (param.type === "bool")
+    return decodeBool(cursor);
+  if (param.type.startsWith("bytes"))
+    return decodeBytes(cursor, param, { staticPosition });
+  if (param.type.startsWith("uint") || param.type.startsWith("int"))
+    return decodeNumber(cursor, param);
+  if (param.type === "string")
+    return decodeString(cursor, { staticPosition });
+  throw new InvalidAbiDecodingTypeError(param.type, {
+    docsPath: "/docs/contract/decodeAbiParameters"
+  });
+}
+var sizeOfLength = 32;
+var sizeOfOffset = 32;
+function decodeAddress(cursor) {
+  const value2 = cursor.readBytes(32);
+  return [checksumAddress(bytesToHex2(sliceBytes(value2, -20))), 32];
+}
+function decodeArray(cursor, param, { length, staticPosition }) {
+  if (!length) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    const startOfData = start + sizeOfLength;
+    cursor.setPosition(start);
+    const length2 = bytesToNumber(cursor.readBytes(sizeOfLength));
+    const dynamicChild = hasDynamicChild(param);
+    let consumed2 = 0;
+    const value3 = [];
+    for (let i2 = 0;i2 < length2; ++i2) {
+      cursor.setPosition(startOfData + (dynamicChild ? i2 * 32 : consumed2));
+      const [data, consumed_] = decodeParameter(cursor, param, {
+        staticPosition: startOfData
+      });
+      consumed2 += consumed_;
+      value3.push(data);
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value3, 32];
+  }
+  if (hasDynamicChild(param)) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    const value3 = [];
+    for (let i2 = 0;i2 < length; ++i2) {
+      cursor.setPosition(start + i2 * 32);
+      const [data] = decodeParameter(cursor, param, {
+        staticPosition: start
+      });
+      value3.push(data);
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value3, 32];
+  }
+  let consumed = 0;
+  const value2 = [];
+  for (let i2 = 0;i2 < length; ++i2) {
+    const [data, consumed_] = decodeParameter(cursor, param, {
+      staticPosition: staticPosition + consumed
+    });
+    consumed += consumed_;
+    value2.push(data);
+  }
+  return [value2, consumed];
+}
+function decodeBool(cursor) {
+  return [bytesToBool(cursor.readBytes(32), { size: 32 }), 32];
+}
+function decodeBytes(cursor, param, { staticPosition }) {
+  const [_, size2] = param.type.split("bytes");
+  if (!size2) {
+    const offset = bytesToNumber(cursor.readBytes(32));
+    cursor.setPosition(staticPosition + offset);
+    const length = bytesToNumber(cursor.readBytes(32));
+    if (length === 0) {
+      cursor.setPosition(staticPosition + 32);
+      return ["0x", 32];
+    }
+    const data = cursor.readBytes(length);
+    cursor.setPosition(staticPosition + 32);
+    return [bytesToHex2(data), 32];
+  }
+  const value2 = bytesToHex2(cursor.readBytes(Number.parseInt(size2), 32));
+  return [value2, 32];
+}
+function decodeNumber(cursor, param) {
+  const signed = param.type.startsWith("int");
+  const size2 = Number.parseInt(param.type.split("int")[1] || "256");
+  const value2 = cursor.readBytes(32);
+  return [
+    size2 > 48 ? bytesToBigInt(value2, { signed }) : bytesToNumber(value2, { signed }),
+    32
+  ];
+}
+function decodeTuple(cursor, param, { staticPosition }) {
+  const hasUnnamedChild = param.components.length === 0 || param.components.some(({ name }) => !name);
+  const value2 = hasUnnamedChild ? [] : {};
+  let consumed = 0;
+  if (hasDynamicChild(param)) {
+    const offset = bytesToNumber(cursor.readBytes(sizeOfOffset));
+    const start = staticPosition + offset;
+    for (let i2 = 0;i2 < param.components.length; ++i2) {
+      const component = param.components[i2];
+      cursor.setPosition(start + consumed);
+      const [data, consumed_] = decodeParameter(cursor, component, {
+        staticPosition: start
+      });
+      consumed += consumed_;
+      value2[hasUnnamedChild ? i2 : component?.name] = data;
+    }
+    cursor.setPosition(staticPosition + 32);
+    return [value2, 32];
+  }
+  for (let i2 = 0;i2 < param.components.length; ++i2) {
+    const component = param.components[i2];
+    const [data, consumed_] = decodeParameter(cursor, component, {
+      staticPosition
+    });
+    value2[hasUnnamedChild ? i2 : component?.name] = data;
+    consumed += consumed_;
+  }
+  return [value2, consumed];
+}
+function decodeString(cursor, { staticPosition }) {
+  const offset = bytesToNumber(cursor.readBytes(32));
+  const start = staticPosition + offset;
+  cursor.setPosition(start);
+  const length = bytesToNumber(cursor.readBytes(32));
+  if (length === 0) {
+    cursor.setPosition(staticPosition + 32);
+    return ["", 32];
+  }
+  const data = cursor.readBytes(length, 32);
+  const value2 = bytesToString(trim(data));
+  cursor.setPosition(staticPosition + 32);
+  return [value2, 32];
+}
+function hasDynamicChild(param) {
+  const { type } = param;
+  if (type === "string")
+    return true;
+  if (type === "bytes")
+    return true;
+  if (type.endsWith("[]"))
+    return true;
+  if (type === "tuple")
+    return param.components?.some(hasDynamicChild);
+  const arrayComponents = getArrayComponents(param.type);
+  if (arrayComponents && hasDynamicChild({ ...param, type: arrayComponents[1] }))
+    return true;
+  return false;
+}
+var hash = (value2) => keccak256(toBytes(value2));
+function hashSignature(sig) {
+  return hash(sig);
+}
+function execTyped(regex, string) {
+  const match = regex.exec(string);
+  return match?.groups;
+}
+var tupleRegex = /^tuple(?<array>(\[(\d*)\])*)$/;
+function formatAbiParameter(abiParameter) {
+  let type = abiParameter.type;
+  if (tupleRegex.test(abiParameter.type) && "components" in abiParameter) {
+    type = "(";
+    const length = abiParameter.components.length;
+    for (let i2 = 0;i2 < length; i2++) {
+      const component = abiParameter.components[i2];
+      type += formatAbiParameter(component);
+      if (i2 < length - 1)
+        type += ", ";
+    }
+    const result = execTyped(tupleRegex, abiParameter.type);
+    type += `)${result?.array ?? ""}`;
+    return formatAbiParameter({
+      ...abiParameter,
+      type
+    });
+  }
+  if ("indexed" in abiParameter && abiParameter.indexed)
+    type = `${type} indexed`;
+  if (abiParameter.name)
+    return `${type} ${abiParameter.name}`;
+  return type;
+}
+function formatAbiParameters(abiParameters) {
+  let params = "";
+  const length = abiParameters.length;
+  for (let i2 = 0;i2 < length; i2++) {
+    const abiParameter = abiParameters[i2];
+    params += formatAbiParameter(abiParameter);
+    if (i2 !== length - 1)
+      params += ", ";
+  }
+  return params;
+}
+function formatAbiItem2(abiItem) {
+  if (abiItem.type === "function")
+    return `function ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability && abiItem.stateMutability !== "nonpayable" ? ` ${abiItem.stateMutability}` : ""}${abiItem.outputs?.length ? ` returns (${formatAbiParameters(abiItem.outputs)})` : ""}`;
+  if (abiItem.type === "event")
+    return `event ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "error")
+    return `error ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "constructor")
+    return `constructor(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  if (abiItem.type === "fallback")
+    return `fallback() external${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  return "receive() external payable";
+}
+function normalizeSignature(signature) {
+  let active = true;
+  let current = "";
+  let level = 0;
+  let result = "";
+  let valid = false;
+  for (let i2 = 0;i2 < signature.length; i2++) {
+    const char = signature[i2];
+    if (["(", ")", ","].includes(char))
+      active = true;
+    if (char === "(")
+      level++;
+    if (char === ")")
+      level--;
+    if (!active)
+      continue;
+    if (level === 0) {
+      if (char === " " && ["event", "function", ""].includes(result))
+        result = "";
+      else {
+        result += char;
+        if (char === ")") {
+          valid = true;
+          break;
+        }
+      }
+      continue;
+    }
+    if (char === " ") {
+      if (signature[i2 - 1] !== "," && current !== "," && current !== ",(") {
+        current = "";
+        active = false;
+      }
+      continue;
+    }
+    result += char;
+    current += char;
+  }
+  if (!valid)
+    throw new BaseError("Unable to normalize signature.");
+  return result;
+}
+var toSignature = (def) => {
+  const def_ = (() => {
+    if (typeof def === "string")
+      return def;
+    return formatAbiItem2(def);
+  })();
+  return normalizeSignature(def_);
+};
+function toSignatureHash(fn) {
+  return hashSignature(toSignature(fn));
+}
+var toFunctionSelector = (fn) => slice(toSignatureHash(fn), 0, 4);
+var toEventSelector = toSignatureHash;
+function getAbiItem(parameters) {
+  const { abi, args = [], name } = parameters;
+  const isSelector = isHex(name, { strict: false });
+  const abiItems = abi.filter((abiItem) => {
+    if (isSelector) {
+      if (abiItem.type === "function")
+        return toFunctionSelector(abiItem) === name;
+      if (abiItem.type === "event")
+        return toEventSelector(abiItem) === name;
+      return false;
+    }
+    return "name" in abiItem && abiItem.name === name;
+  });
+  if (abiItems.length === 0)
+    return;
+  if (abiItems.length === 1)
+    return abiItems[0];
+  let matchedAbiItem = undefined;
+  for (const abiItem of abiItems) {
+    if (!("inputs" in abiItem))
+      continue;
+    if (!args || args.length === 0) {
+      if (!abiItem.inputs || abiItem.inputs.length === 0)
+        return abiItem;
+      continue;
+    }
+    if (!abiItem.inputs)
+      continue;
+    if (abiItem.inputs.length === 0)
+      continue;
+    if (abiItem.inputs.length !== args.length)
+      continue;
+    const matched = args.every((arg, index) => {
+      const abiParameter = "inputs" in abiItem && abiItem.inputs[index];
+      if (!abiParameter)
+        return false;
+      return isArgOfType(arg, abiParameter);
+    });
+    if (matched) {
+      if (matchedAbiItem && "inputs" in matchedAbiItem && matchedAbiItem.inputs) {
+        const ambiguousTypes = getAmbiguousTypes(abiItem.inputs, matchedAbiItem.inputs, args);
+        if (ambiguousTypes)
+          throw new AbiItemAmbiguityError({
+            abiItem,
+            type: ambiguousTypes[0]
+          }, {
+            abiItem: matchedAbiItem,
+            type: ambiguousTypes[1]
+          });
+      }
+      matchedAbiItem = abiItem;
+    }
+  }
+  if (matchedAbiItem)
+    return matchedAbiItem;
+  return abiItems[0];
+}
+function isArgOfType(arg, abiParameter) {
+  const argType = typeof arg;
+  const abiParameterType = abiParameter.type;
+  switch (abiParameterType) {
+    case "address":
+      return isAddress(arg, { strict: false });
+    case "bool":
+      return argType === "boolean";
+    case "function":
+      return argType === "string";
+    case "string":
+      return argType === "string";
+    default: {
+      if (abiParameterType === "tuple" && "components" in abiParameter)
+        return Object.values(abiParameter.components).every((component, index) => {
+          return isArgOfType(Object.values(arg)[index], component);
+        });
+      if (/^u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/.test(abiParameterType))
+        return argType === "number" || argType === "bigint";
+      if (/^bytes([1-9]|1[0-9]|2[0-9]|3[0-2])?$/.test(abiParameterType))
+        return argType === "string" || arg instanceof Uint8Array;
+      if (/[a-z]+[1-9]{0,3}(\[[0-9]{0,}\])+$/.test(abiParameterType)) {
+        return Array.isArray(arg) && arg.every((x) => isArgOfType(x, {
+          ...abiParameter,
+          type: abiParameterType.replace(/(\[[0-9]{0,}\])$/, "")
+        }));
+      }
+      return false;
+    }
+  }
+}
+function getAmbiguousTypes(sourceParameters, targetParameters, args) {
+  for (const parameterIndex in sourceParameters) {
+    const sourceParameter = sourceParameters[parameterIndex];
+    const targetParameter = targetParameters[parameterIndex];
+    if (sourceParameter.type === "tuple" && targetParameter.type === "tuple" && "components" in sourceParameter && "components" in targetParameter)
+      return getAmbiguousTypes(sourceParameter.components, targetParameter.components, args[parameterIndex]);
+    const types4 = [sourceParameter.type, targetParameter.type];
+    const ambiguous = (() => {
+      if (types4.includes("address") && types4.includes("bytes20"))
+        return true;
+      if (types4.includes("address") && types4.includes("string"))
+        return isAddress(args[parameterIndex], { strict: false });
+      if (types4.includes("address") && types4.includes("bytes"))
+        return isAddress(args[parameterIndex], { strict: false });
+      return false;
+    })();
+    if (ambiguous)
+      return types4;
+  }
+  return;
+}
+var docsPath = "/docs/contract/encodeFunctionData";
+function prepareEncodeFunctionData(parameters) {
+  const { abi, args, functionName } = parameters;
+  let abiItem = abi[0];
+  if (functionName) {
+    const item = getAbiItem({
+      abi,
+      args,
+      name: functionName
+    });
+    if (!item)
+      throw new AbiFunctionNotFoundError(functionName, { docsPath });
+    abiItem = item;
+  }
+  if (abiItem.type !== "function")
+    throw new AbiFunctionNotFoundError(undefined, { docsPath });
+  return {
+    abi: [abiItem],
+    functionName: toFunctionSelector(formatAbiItem(abiItem))
+  };
+}
+function encodeFunctionData(parameters) {
+  const { args } = parameters;
+  const { abi, functionName } = (() => {
+    if (parameters.abi.length === 1 && parameters.functionName?.startsWith("0x"))
+      return parameters;
+    return prepareEncodeFunctionData(parameters);
+  })();
+  const abiItem = abi[0];
+  const signature = functionName;
+  const data = "inputs" in abiItem && abiItem.inputs ? encodeAbiParameters(abiItem.inputs, args ?? []) : undefined;
+  return concatHex([signature, data ?? "0x"]);
+}
+var TIER_MAX = 5;
+var HF_INSTITUTIONAL = 3;
+var HF_STRONG = 2;
+var HF_ADEQUATE = 1.5;
+var HF_WEAK = 1.2;
+var HF_CRITICAL = 1;
+var CONTAGION_THRESHOLD_TIER_1 = 20;
+var CONTAGION_THRESHOLD_TIER_2 = 40;
+var CONTAGION_THRESHOLD_TIER_3 = 60;
+var CONTAGION_THRESHOLD_TIER_4 = 75;
+var CONTAGION_SCORE_MAX = 100;
+var DSS_THRESHOLD_TIER_1 = 90;
+var DSS_THRESHOLD_TIER_2 = 75;
+var DSS_THRESHOLD_TIER_3 = 60;
+var DSS_THRESHOLD_TIER_4 = 40;
+var DSS_MAX = 100;
+var NEUTRAL_DSS = 50;
+var WEI_PER_TOKEN = 1000000000000000000n;
+var PRICE_DROP_SCENARIOS = [
+  0.05,
+  0.1,
+  0.15,
+  0.2,
+  0.25,
+  0.3,
+  0.4,
+  0.5
+];
+var CANONICAL_USD_ASSET = "0x0000000000000000000000000000000000000001";
+var ADAPTER_ERROR_CODES = {
+  NETWORK_ERROR: "NETWORK_ERROR",
+  INVALID_RESPONSE: "INVALID_RESPONSE",
+  PARSE_ERROR: "PARSE_ERROR",
+  RATE_LIMITED: "RATE_LIMITED",
+  NOT_FOUND: "NOT_FOUND",
+  NO_POSITIONS: "NO_POSITIONS"
+};
+var ok2 = (data) => ({ ok: true, data });
+var err = (error) => ({ ok: false, error });
+var CHAIN_ID_ETHEREUM_MAINNET = 1;
+var CHAIN_ID_ETHEREUM_SEPOLIA = 11155111;
+var USD_PRECISION_FACTOR = 1e6;
+var USD_PRECISION_SCALE = 1000000000000n;
+function usdToWei(usdAmount) {
+  return BigInt(Math.round(usdAmount * USD_PRECISION_FACTOR)) * USD_PRECISION_SCALE;
+}
+function isRecord(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function hasRequiredAaveFields(raw) {
+  if (!isRecord(raw))
+    return false;
+  return typeof raw["healthFactor"] === "string" && typeof raw["totalCollateralMarketReferenceCurrency"] === "string" && typeof raw["totalDebtMarketReferenceCurrency"] === "string";
+}
+function parseLiquidationThreshold(raw, fallback2) {
+  if (raw === undefined || raw === "")
+    return fallback2;
+  const parsed = parseFloat(raw);
+  if (!isFinite(parsed) || parsed < 0)
+    return fallback2;
+  if (parsed > 1)
+    return parsed / 1e4;
+  return parsed;
+}
+function buildAggregatePosition(data, chainId) {
+  const collateralUSD = parseFloat(data.totalCollateralMarketReferenceCurrency);
+  const debtUSD = parseFloat(data.totalDebtMarketReferenceCurrency);
+  let liqThreshold = parseLiquidationThreshold(data.currentLiquidationThreshold, 0);
+  if (liqThreshold === 0 && collateralUSD > 0 && debtUSD > 0) {
+    const hf = parseFloat(data.healthFactor);
+    if (isFinite(hf) && hf > 0) {
+      liqThreshold = hf * debtUSD / collateralUSD;
+    }
+  }
+  return {
+    protocol: "aave",
+    chainId,
+    collateralAsset: CANONICAL_USD_ASSET,
+    collateralAmount: usdToWei(collateralUSD),
+    debtAsset: CANONICAL_USD_ASSET,
+    debtAmount: usdToWei(debtUSD),
+    liquidationThreshold: liqThreshold
+  };
+}
+function buildReservePositions(data, chainId) {
+  const reserves = data.userReserves ?? [];
+  const totalDebtUSD = parseFloat(data.totalDebtMarketReferenceCurrency);
+  const collateralReserves = reserves.filter((r) => r.usageAsCollateralEnabledOnUser && BigInt(r.currentATokenBalance) > 0n);
+  if (collateralReserves.length === 0)
+    return [];
+  const positionCount = BigInt(collateralReserves.length);
+  const totalDebtWei = usdToWei(totalDebtUSD);
+  return collateralReserves.map((r) => {
+    const liqThreshold = parseLiquidationThreshold(r.reserve.reserveLiquidationThreshold, 0.8);
+    return {
+      protocol: "aave",
+      chainId,
+      collateralAsset: r.reserve.underlyingAsset.toLowerCase(),
+      collateralAmount: BigInt(r.currentATokenBalance),
+      debtAsset: CANONICAL_USD_ASSET,
+      debtAmount: totalDebtWei / positionCount,
+      liquidationThreshold: liqThreshold
+    };
+  });
+}
+var AaveAdapter = {
+  normalize(rawBody, options = {}) {
+    const chainId = options.chainId ?? CHAIN_ID_ETHEREUM_MAINNET;
+    const useIndividualReserves = options.useIndividualReserves ?? true;
+    if (!isRecord(rawBody)) {
+      return err({
+        protocol: "aave",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: "Response body is not a JSON object"
+      });
+    }
+    if (!hasRequiredAaveFields(rawBody)) {
+      return err({
+        protocol: "aave",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: "Response missing required fields: healthFactor, " + "totalCollateralMarketReferenceCurrency, totalDebtMarketReferenceCurrency"
+      });
+    }
+    const collateralUSD = parseFloat(rawBody.totalCollateralMarketReferenceCurrency);
+    const debtUSD = parseFloat(rawBody.totalDebtMarketReferenceCurrency);
+    if (!isFinite(collateralUSD) || !isFinite(debtUSD)) {
+      return err({
+        protocol: "aave",
+        code: ADAPTER_ERROR_CODES.PARSE_ERROR,
+        message: "Could not parse collateral or debt USD values as finite numbers"
+      });
+    }
+    if (collateralUSD === 0 && debtUSD === 0) {
+      return err({
+        protocol: "aave",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: "Wallet has no active Aave positions"
+      });
+    }
+    if (useIndividualReserves && Array.isArray(rawBody.userReserves) && rawBody.userReserves.length > 0) {
+      const positions = buildReservePositions(rawBody, chainId);
+      if (positions.length > 0) {
+        return ok2(positions);
+      }
+    }
+    return ok2([buildAggregatePosition(rawBody, chainId)]);
+  },
+  normalizeTestnet(rawBody, options = {}) {
+    return AaveAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_ETHEREUM_SEPOLIA
+    });
+  }
+};
+var CHAIN_ID_ETHEREUM_MAINNET2 = 1;
+var CHAIN_ID_ETHEREUM_SEPOLIA2 = 11155111;
+var CHAIN_ID_BASE_MAINNET = 8453;
+var CHAIN_ID_BASE_SEPOLIA = 84532;
+var MORPHO_VIRTUAL_ASSETS = 1n;
+var MORPHO_VIRTUAL_SHARES = 1000000n;
+var MORPHO_WAD = WEI_PER_TOKEN;
+var EVM_ADDRESS_REGEX = /^0x[0-9a-fA-F]{40}$/;
+function isValidEvmAddress(value2) {
+  return typeof value2 === "string" && EVM_ADDRESS_REGEX.test(value2);
+}
+function isRecord2(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function isRawMorphoToken(value2) {
+  if (!isRecord2(value2))
+    return false;
+  return isValidEvmAddress(value2["address"]) && typeof value2["symbol"] === "string" && value2["symbol"].length > 0 && typeof value2["decimals"] === "number" && Number.isInteger(value2["decimals"]) && value2["decimals"] >= 0 && value2["decimals"] <= 18;
+}
+function isRawMorphoMarket(value2) {
+  if (!isRecord2(value2))
+    return false;
+  return typeof value2["uniqueKey"] === "string" && value2["uniqueKey"].length > 0 && isRawMorphoToken(value2["loanAsset"]) && isRawMorphoToken(value2["collateralAsset"]) && typeof value2["lltv"] === "string" && value2["lltv"].length > 0;
+}
+function isRawMorphoPosition(value2) {
+  if (!isRecord2(value2))
+    return false;
+  return isRawMorphoMarket(value2["market"]) && typeof value2["borrowShares"] === "string" && typeof value2["collateral"] === "string" && typeof value2["supplyShares"] === "string";
+}
+function extractRawPositions(body) {
+  const data = body["data"];
+  if (isRecord2(data)) {
+    const user = data["userByAddress"];
+    if (isRecord2(user) && Array.isArray(user["marketPositions"])) {
+      return user["marketPositions"];
+    }
+    if (Array.isArray(data["marketPositions"])) {
+      return data["marketPositions"];
+    }
+  }
+  if (Array.isArray(body["marketPositions"])) {
+    return body["marketPositions"];
+  }
+  if (Array.isArray(body["positions"])) {
+    return body["positions"];
+  }
+  return [];
+}
+function validatePositions(rawPositions) {
+  return rawPositions.filter(isRawMorphoPosition);
+}
+function parseLltvFromWad(raw, fallback2) {
+  if (raw === "")
+    return fallback2;
+  if (raw.includes(".")) {
+    const fraction = parseFloat(raw);
+    if (!isFinite(fraction) || fraction < 0 || fraction > 1)
+      return fallback2;
+    return fraction;
+  }
+  try {
+    const wadValue = BigInt(raw);
+    if (wadValue < 0n || wadValue > MORPHO_WAD)
+      return fallback2;
+    return Number(wadValue * 10000n / MORPHO_WAD) / 1e4;
+  } catch {
+    return fallback2;
+  }
+}
+function computeBorrowAssetsFromShares(borrowShares, totalBorrowAssets, totalBorrowShares) {
+  const numerator = borrowShares * (totalBorrowAssets + MORPHO_VIRTUAL_ASSETS);
+  const denominator = totalBorrowShares + MORPHO_VIRTUAL_SHARES;
+  return numerator / denominator;
+}
+function resolveBorrowAssets(position) {
+  if (position.borrowAssets !== undefined && position.borrowAssets !== "") {
+    try {
+      const assets = BigInt(position.borrowAssets);
+      if (assets >= 0n)
+        return assets;
+    } catch {}
+  }
+  try {
+    const borrowShares = BigInt(position.borrowShares);
+    if (borrowShares === 0n)
+      return 0n;
+    const state = position.market.state;
+    const totalBorrowAssets = state?.borrowAssets !== undefined ? BigInt(state.borrowAssets) : 0n;
+    const totalBorrowShares = state?.borrowShares !== undefined ? BigInt(state.borrowShares) : 0n;
+    return computeBorrowAssetsFromShares(borrowShares, totalBorrowAssets, totalBorrowShares);
+  } catch {
+    return 0n;
+  }
+}
+var MORPHO_DEFAULT_LLTV_FALLBACK = 0.77;
+function buildMarketPosition(position, chainId) {
+  let collateralAmount;
+  try {
+    collateralAmount = BigInt(position.collateral);
+  } catch {
+    return null;
+  }
+  const debtAmount = resolveBorrowAssets(position);
+  if (collateralAmount === 0n && debtAmount === 0n) {
+    return null;
+  }
+  const liqThreshold = parseLltvFromWad(position.market.lltv, MORPHO_DEFAULT_LLTV_FALLBACK);
+  return {
+    protocol: "morpho",
+    chainId,
+    collateralAsset: position.market.collateralAsset.address.toLowerCase(),
+    collateralAmount,
+    debtAsset: position.market.loanAsset.address.toLowerCase(),
+    debtAmount,
+    liquidationThreshold: liqThreshold
+  };
+}
+var MorphoAdapter = {
+  normalize(rawBody, options = {}) {
+    const chainId = options.chainId ?? CHAIN_ID_ETHEREUM_MAINNET2;
+    if (!isRecord2(rawBody)) {
+      return err({
+        protocol: "morpho",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: "Response body is not a JSON object"
+      });
+    }
+    const rawPositions = extractRawPositions(rawBody);
+    if (rawPositions.length === 0) {
+      return err({
+        protocol: "morpho",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: "No market positions array found in response. " + "Expected one of: data.userByAddress.marketPositions, " + "marketPositions, or positions."
+      });
+    }
+    const validPositions = validatePositions(rawPositions);
+    if (validPositions.length === 0) {
+      return err({
+        protocol: "morpho",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: `Found ${rawPositions.length} raw position entries but none passed ` + "structural validation. Required fields per entry: " + "market.uniqueKey, market.loanAsset.{address,symbol,decimals}, " + "market.collateralAsset.{address,symbol,decimals}, market.lltv, " + "borrowShares, collateral, supplyShares."
+      });
+    }
+    const positions = [];
+    for (const position of validPositions) {
+      const positionData = buildMarketPosition(position, chainId);
+      if (positionData !== null) {
+        positions.push(positionData);
+      }
+    }
+    if (positions.length === 0) {
+      return err({
+        protocol: "morpho",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: `Validated ${validPositions.length} position entries but all are ` + "pure supply positions (no collateral deposited, no outstanding borrow). " + "Wallet has no active Morpho Blue borrowing positions."
+      });
+    }
+    return ok2(positions);
+  },
+  normalizeTestnet(rawBody, options = {}) {
+    return MorphoAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_ETHEREUM_SEPOLIA2
+    });
+  },
+  normalizeBase(rawBody, options = {}) {
+    return MorphoAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_BASE_MAINNET
+    });
+  },
+  normalizeBaseSepolia(rawBody, options = {}) {
+    return MorphoAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_BASE_SEPOLIA
+    });
+  }
+};
+var CHAIN_ID_ETHEREUM_MAINNET3 = 1;
+var CHAIN_ID_ETHEREUM_SEPOLIA3 = 11155111;
+var CHAIN_ID_POLYGON_MAINNET = 137;
+var CHAIN_ID_ARBITRUM_MAINNET = 42161;
+var CHAIN_ID_BASE_MAINNET2 = 8453;
+var CHAIN_ID_OPTIMISM_MAINNET = 10;
+var COMPOUND_FACTOR_WAD = WEI_PER_TOKEN;
+var COMPOUND_DEFAULT_LIQUIDATION_FACTOR = 0.825;
+var MIN_TOKEN_DECIMALS = 0;
+var MAX_TOKEN_DECIMALS = 18;
+var WEI_DECIMALS = 18;
+var EVM_ADDRESS_REGEX2 = /^0x[0-9a-fA-F]{40}$/;
+function isValidEvmAddress2(value2) {
+  return typeof value2 === "string" && EVM_ADDRESS_REGEX2.test(value2);
+}
+function isRecord3(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function isRawCompoundToken(value2) {
+  if (!isRecord3(value2))
+    return false;
+  return isValidEvmAddress2(value2["address"]) && typeof value2["symbol"] === "string" && value2["symbol"].length > 0 && typeof value2["decimals"] === "number" && Number.isInteger(value2["decimals"]) && value2["decimals"] >= MIN_TOKEN_DECIMALS && value2["decimals"] <= MAX_TOKEN_DECIMALS;
+}
+function isRawCompoundCollateralAsset(value2) {
+  if (!isRecord3(value2))
+    return false;
+  return isRawCompoundToken(value2["asset"]) && typeof value2["balance"] === "string" && value2["balance"].length > 0;
+}
+function isRawCompoundCometPosition(value2) {
+  if (!isRecord3(value2))
+    return false;
+  if (!isRawCompoundToken(value2["baseToken"]))
+    return false;
+  if (!Array.isArray(value2["collateralAssets"]))
+    return false;
+  const hasBorrowBalance = typeof value2["borrowBalance"] === "string" || typeof value2["borrowBalanceOf"] === "string";
+  if (!hasBorrowBalance)
+    return false;
+  return true;
+}
+function extractCometPositions(body) {
+  if (Array.isArray(body["markets"]))
+    return body["markets"];
+  if (Array.isArray(body["positions"]))
+    return body["positions"];
+  if (Array.isArray(body["cometPositions"]))
+    return body["cometPositions"];
+  return [];
+}
+function validateCometPositions(rawPositions) {
+  return rawPositions.filter(isRawCompoundCometPosition);
+}
+function parseLiquidationFactor(raw, fallback2) {
+  if (raw === undefined || raw === "")
+    return fallback2;
+  if (raw.includes(".") && parseFloat(raw) <= 1) {
+    const fraction = parseFloat(raw);
+    if (!isFinite(fraction) || fraction < 0)
+      return fallback2;
+    return Math.min(fraction, 1);
+  }
+  if (raw.includes(".") && parseFloat(raw) > 1) {
+    const pct = parseFloat(raw);
+    if (!isFinite(pct) || pct < 0 || pct > 100)
+      return fallback2;
+    return pct / 100;
+  }
+  try {
+    const wadValue = BigInt(raw);
+    if (wadValue < 0n || wadValue > COMPOUND_FACTOR_WAD)
+      return fallback2;
+    return Number(wadValue * 10000n / COMPOUND_FACTOR_WAD) / 1e4;
+  } catch {
+    return fallback2;
+  }
+}
+function resolveLiquidationFactor(asset) {
+  return parseLiquidationFactor(asset.liquidateCollateralFactor ?? asset.liquidationFactor, COMPOUND_DEFAULT_LIQUIDATION_FACTOR);
+}
+function normaliseToWei(rawAmount, tokenDecimals) {
+  try {
+    const rawBigInt = BigInt(rawAmount);
+    const decimalDiff = WEI_DECIMALS - tokenDecimals;
+    if (decimalDiff > 0) {
+      return rawBigInt * 10n ** BigInt(decimalDiff);
+    } else if (decimalDiff < 0) {
+      return rawBigInt / 10n ** BigInt(-decimalDiff);
+    } else {
+      return rawBigInt;
+    }
+  } catch {
+    return 0n;
+  }
+}
+function resolveBorrowBalance(position) {
+  const raw = position.borrowBalance ?? position.borrowBalanceOf;
+  if (raw === undefined || raw === "")
+    return 0n;
+  return normaliseToWei(raw, position.baseToken.decimals);
+}
+function resolveCollateralBalance(asset) {
+  return normaliseToWei(asset.balance, asset.asset.decimals);
+}
+function buildCollateralList(assets) {
+  return assets.map((asset) => ({
+    asset,
+    collateralAmountWei: resolveCollateralBalance(asset),
+    usdValue: asset.collateralUsdValue !== undefined ? parseFloat(asset.collateralUsdValue) : 0
+  })).filter((c) => c.collateralAmountWei > 0n);
+}
+function splitDebtByUsdValue(totalDebtWei, collaterals) {
+  if (collaterals.length === 0)
+    return [];
+  if (collaterals.length === 1)
+    return [totalDebtWei];
+  const totalUsd = collaterals.reduce((sum, c) => sum + c.usdValue, 0);
+  if (totalUsd <= 0) {
+    const shareEach = totalDebtWei / BigInt(collaterals.length);
+    const remainder = totalDebtWei - shareEach * BigInt(collaterals.length);
+    return collaterals.map((_, i2) => i2 === 0 ? shareEach + remainder : shareEach);
+  }
+  const SPLIT_PRECISION = 1000000n;
+  const totalUsdScaled = BigInt(Math.round(totalUsd * 1e6));
+  const shares = [];
+  let allocated = 0n;
+  for (let i2 = 0;i2 < collaterals.length; i2++) {
+    const collateral = collaterals[i2];
+    if (i2 === collaterals.length - 1) {
+      shares.push(totalDebtWei - allocated);
+    } else {
+      const usdScaled = BigInt(Math.round((collateral?.usdValue ?? 0) * 1e6));
+      const share = totalDebtWei * usdScaled / totalUsdScaled / SPLIT_PRECISION * SPLIT_PRECISION / SPLIT_PRECISION;
+      const debtShare = totalDebtWei * usdScaled / totalUsdScaled;
+      shares.push(debtShare);
+      allocated += debtShare;
+    }
+  }
+  return shares;
+}
+function buildAggregatePosition2(position, borrowAmountWei, chainId) {
+  return {
+    protocol: "compound",
+    chainId,
+    collateralAsset: CANONICAL_USD_ASSET,
+    collateralAmount: 0n,
+    debtAsset: position.baseToken.address.toLowerCase(),
+    debtAmount: borrowAmountWei,
+    liquidationThreshold: COMPOUND_DEFAULT_LIQUIDATION_FACTOR
+  };
+}
+function buildPerCollateralPositions(position, collaterals, borrowAmountWei, chainId) {
+  const debtShares = splitDebtByUsdValue(borrowAmountWei, collaterals);
+  const positions = [];
+  for (let i2 = 0;i2 < collaterals.length; i2++) {
+    const collateral = collaterals[i2];
+    const debtShare = debtShares[i2];
+    if (collateral === undefined || debtShare === undefined)
+      continue;
+    const liqThreshold = resolveLiquidationFactor(collateral.asset);
+    positions.push({
+      protocol: "compound",
+      chainId,
+      collateralAsset: collateral.asset.asset.address.toLowerCase(),
+      collateralAmount: collateral.collateralAmountWei,
+      debtAsset: position.baseToken.address.toLowerCase(),
+      debtAmount: debtShare,
+      liquidationThreshold: liqThreshold
+    });
+  }
+  return positions;
+}
+function processCometPosition(position, chainId) {
+  const borrowAmountWei = resolveBorrowBalance(position);
+  if (borrowAmountWei === 0n)
+    return [];
+  const validCollaterals = buildCollateralList(position.collateralAssets.filter(isRawCompoundCollateralAsset));
+  if (validCollaterals.length === 0) {
+    return [buildAggregatePosition2(position, borrowAmountWei, chainId)];
+  }
+  if (validCollaterals.length === 1) {
+    const collateral = validCollaterals[0];
+    if (collateral === undefined)
+      return [buildAggregatePosition2(position, borrowAmountWei, chainId)];
+    return [
+      {
+        protocol: "compound",
+        chainId,
+        collateralAsset: collateral.asset.asset.address.toLowerCase(),
+        collateralAmount: collateral.collateralAmountWei,
+        debtAsset: position.baseToken.address.toLowerCase(),
+        debtAmount: borrowAmountWei,
+        liquidationThreshold: resolveLiquidationFactor(collateral.asset)
+      }
+    ];
+  }
+  return buildPerCollateralPositions(position, validCollaterals, borrowAmountWei, chainId);
+}
+var CompoundAdapter = {
+  normalize(rawBody, options = {}) {
+    const chainId = options.chainId ?? CHAIN_ID_ETHEREUM_MAINNET3;
+    if (!isRecord3(rawBody)) {
+      return err({
+        protocol: "compound",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: "Response body is not a JSON object"
+      });
+    }
+    const rawPositions = extractCometPositions(rawBody);
+    if (rawPositions.length === 0) {
+      return err({
+        protocol: "compound",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: "No Comet positions array found in response. " + "Expected one of: markets, positions, or cometPositions."
+      });
+    }
+    const validPositions = validateCometPositions(rawPositions);
+    if (validPositions.length === 0) {
+      return err({
+        protocol: "compound",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: `Found ${rawPositions.length} raw Comet position entries but none ` + "passed structural validation. Required fields per entry: " + "baseToken.{address,symbol,decimals}, collateralAssets[], " + "and one of borrowBalance or borrowBalanceOf."
+      });
+    }
+    const positions = [];
+    for (const cometPosition of validPositions) {
+      const entries = processCometPosition(cometPosition, chainId);
+      positions.push(...entries);
+    }
+    if (positions.length === 0) {
+      return err({
+        protocol: "compound",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: `Validated ${validPositions.length} Comet market positions but all ` + "have zero borrow balance. Wallet has no active Compound v3 " + "borrowing positions (may be a pure supplier)."
+      });
+    }
+    return ok2(positions);
+  },
+  normalizeTestnet(rawBody, options = {}) {
+    return CompoundAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_ETHEREUM_SEPOLIA3
+    });
+  },
+  normalizePolygon(rawBody, options = {}) {
+    return CompoundAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_POLYGON_MAINNET
+    });
+  },
+  normalizeArbitrum(rawBody, options = {}) {
+    return CompoundAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_ARBITRUM_MAINNET
+    });
+  },
+  normalizeBase(rawBody, options = {}) {
+    return CompoundAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_BASE_MAINNET2
+    });
+  },
+  normalizeOptimism(rawBody, options = {}) {
+    return CompoundAdapter.normalize(rawBody, {
+      ...options,
+      chainId: CHAIN_ID_OPTIMISM_MAINNET
+    });
+  }
+};
+var PLAID_USD_CURRENCY_CODE = "USD";
+var MAX_CREDIT_UTILIZATION = 1;
+var MIN_MEANINGFUL_BALANCE_USD = 0.01;
+function isRecord4(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2);
+}
+function isRawPlaidBalances(value2) {
+  if (!isRecord4(value2))
+    return false;
+  return (typeof value2["current"] === "number" || value2["current"] === null) && (typeof value2["available"] === "number" || value2["available"] === null) && (typeof value2["limit"] === "number" || value2["limit"] === null) && (typeof value2["iso_currency_code"] === "string" || value2["iso_currency_code"] === null) && (typeof value2["unofficial_currency_code"] === "string" || value2["unofficial_currency_code"] === null);
+}
+function isRawPlaidAccount(value2) {
+  if (!isRecord4(value2))
+    return false;
+  return typeof value2["account_id"] === "string" && value2["account_id"].length > 0 && typeof value2["type"] === "string" && value2["type"].length > 0 && isRawPlaidBalances(value2["balances"]) && typeof value2["name"] === "string";
+}
+function isPlaidErrorResponse(body) {
+  return typeof body["error_type"] === "string" || typeof body["error_code"] === "string";
+}
+function mapAccountType(rawType) {
+  switch (rawType.toLowerCase()) {
+    case "depository":
+      return "depository";
+    case "credit":
+      return "credit";
+    case "loan":
+      return "loan";
+    case "investment":
+      return "investment";
+    case "brokerage":
+      return "investment";
+    default:
+      return "other";
+  }
+}
+function isUsdDenominated(balances) {
+  return balances.iso_currency_code === PLAID_USD_CURRENCY_CODE;
+}
+function normalizeAccount(raw) {
+  const type = mapAccountType(raw.type);
+  if (!isUsdDenominated(raw.balances)) {
+    return {
+      accountId: raw.account_id,
+      type: "other",
+      availableUSD: null,
+      currentUSD: 0,
+      limitUSD: null
+    };
+  }
+  const rawCurrent = raw.balances.current ?? 0;
+  const rawAvailable = raw.balances.available;
+  const rawLimit = raw.balances.limit;
+  const currentUSD = Math.abs(rawCurrent) >= MIN_MEANINGFUL_BALANCE_USD ? rawCurrent : 0;
+  const availableUSD = rawAvailable !== null && Math.abs(rawAvailable) >= MIN_MEANINGFUL_BALANCE_USD ? rawAvailable : rawAvailable === null ? null : 0;
+  const limitUSD = rawLimit !== null && rawLimit >= MIN_MEANINGFUL_BALANCE_USD ? rawLimit : rawLimit === null ? null : 0;
+  return {
+    accountId: raw.account_id,
+    type,
+    availableUSD,
+    currentUSD,
+    limitUSD
+  };
+}
+function computeAggregates(accounts) {
+  let totalLiquidAssetsUSD = 0;
+  let totalCreditLimitUSD = 0;
+  let totalCreditUsedUSD = 0;
+  for (const account of accounts) {
+    if (account.type === "depository") {
+      const liquidContribution = account.availableUSD ?? account.currentUSD;
+      totalLiquidAssetsUSD += Math.max(0, liquidContribution);
+    } else if (account.type === "credit") {
+      if (account.limitUSD !== null && account.limitUSD > 0) {
+        totalCreditLimitUSD += account.limitUSD;
+      }
+      if (account.currentUSD > 0) {
+        totalCreditUsedUSD += account.currentUSD;
+      }
+    }
+  }
+  const totalCreditUtilization = totalCreditLimitUSD > 0 ? Math.min(totalCreditUsedUSD / totalCreditLimitUSD, MAX_CREDIT_UTILIZATION) : 0;
+  return {
+    totalLiquidAssetsUSD: Math.max(0, totalLiquidAssetsUSD),
+    totalCreditLimitUSD: Math.max(0, totalCreditLimitUSD),
+    totalCreditUsedUSD: Math.max(0, totalCreditUsedUSD),
+    totalCreditUtilization
+  };
+}
+var PlaidAdapter = {
+  normalize(rawBody) {
+    if (!isRecord4(rawBody)) {
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: "Response body is not a JSON object"
+      });
+    }
+    if (isPlaidErrorResponse(rawBody)) {
+      const errorType = rawBody["error_type"];
+      const errorCode = rawBody["error_code"];
+      const errorMessage = rawBody["error_message"];
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: `Plaid returned an error response: ${errorType ?? "UNKNOWN"} / ` + `${errorCode ?? "UNKNOWN"}. ${errorMessage ?? ""}`.trim()
+      });
+    }
+    if (!Array.isArray(rawBody["accounts"])) {
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: 'Response missing required "accounts" array. ' + "Expected Plaid /accounts/balance/get response shape."
+      });
+    }
+    const rawAccounts = rawBody["accounts"];
+    if (rawAccounts.length === 0) {
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: "Plaid response contains zero accounts."
+      });
+    }
+    const validRawAccounts = rawAccounts.filter(isRawPlaidAccount);
+    if (validRawAccounts.length === 0) {
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.INVALID_RESPONSE,
+        message: `Found ${rawAccounts.length} account entries but none passed ` + "structural validation. Required fields per account: " + "account_id (string), type (string), name (string), " + "balances.{current, available, limit, iso_currency_code}."
+      });
+    }
+    const accounts = validRawAccounts.map(normalizeAccount);
+    const hasUsdAccounts = accounts.some((a) => a.type !== "other");
+    if (!hasUsdAccounts) {
+      return err({
+        protocol: "plaid",
+        code: ADAPTER_ERROR_CODES.NO_POSITIONS,
+        message: `All ${accounts.length} Plaid account(s) are non-USD denominated ` + "or unrecognized type. Cannot compute credit aggregates without " + "USD-denominated account data."
+      });
+    }
+    const aggregates = computeAggregates(accounts);
+    const plaidData = {
+      accounts,
+      ...aggregates
+    };
+    return ok2(plaidData);
+  }
+};
+var LIQUIDATION_THRESHOLD_PRECISION = 1e4;
+var LIQUIDATION_THRESHOLD_PRECISION_BIG = 10000n;
+var INFINITE_HEALTH_FACTOR = Infinity;
+function resolvePrice(prices, asset) {
+  const target = asset.toLowerCase();
+  if (target === CANONICAL_USD_ASSET) {
+    return prices[CANONICAL_USD_ASSET] ?? WEI_PER_TOKEN;
+  }
+  return prices[target] ?? 0n;
+}
+function thresholdToBasisPoints(threshold) {
+  return BigInt(Math.round(threshold * LIQUIDATION_THRESHOLD_PRECISION));
+}
+function computeCollateralUSD(position, prices) {
+  const price = resolvePrice(prices, position.collateralAsset);
+  if (price === 0n)
+    return 0n;
+  return position.collateralAmount * price / WEI_PER_TOKEN;
+}
+function computeAdjustedCollateralUSD(position, prices) {
+  const collateralUSD = computeCollateralUSD(position, prices);
+  const thresholdBps = thresholdToBasisPoints(position.liquidationThreshold);
+  return collateralUSD * thresholdBps / LIQUIDATION_THRESHOLD_PRECISION_BIG;
+}
+function computeDebtUSD(position, prices) {
+  const price = resolvePrice(prices, position.debtAsset);
+  const effectivePrice = price > 0n ? price : WEI_PER_TOKEN;
+  return position.debtAmount * effectivePrice / WEI_PER_TOKEN;
+}
+function computeUnifiedHealthFactor(positions, prices) {
+  if (positions.length === 0)
+    return INFINITE_HEALTH_FACTOR;
+  let totalAdjustedCollateralUSD = 0n;
+  let totalDebtUSD = 0n;
+  for (const position of positions) {
+    totalAdjustedCollateralUSD += computeAdjustedCollateralUSD(position, prices);
+    totalDebtUSD += computeDebtUSD(position, prices);
+  }
+  if (totalDebtUSD === 0n)
+    return INFINITE_HEALTH_FACTOR;
+  return Number(totalAdjustedCollateralUSD) / Number(totalDebtUSD);
+}
+function buildPriceMap(tokenPrices) {
+  return {
+    ...tokenPrices,
+    [CANONICAL_USD_ASSET]: WEI_PER_TOKEN
+  };
+}
+var MAX_DROP_SCENARIO = 0.5;
+var LIQUIDATION_HF = 1;
+var SHOCK_BPS = 10000n;
+var SHOCK_BPS_NUMBER = 1e4;
+function applyPriceShock(prices, dropFraction) {
+  const retainBps = BigInt(Math.round((1 - dropFraction) * SHOCK_BPS_NUMBER));
+  const shocked = {};
+  for (const [asset, price] of Object.entries(prices)) {
+    if (asset === CANONICAL_USD_ASSET) {
+      shocked[asset] = price;
+    } else {
+      shocked[asset] = price * retainBps / SHOCK_BPS;
+    }
+  }
+  return shocked;
+}
+function computeCascadeThreshold(positions, prices) {
+  for (const dropFraction of PRICE_DROP_SCENARIOS) {
+    const shockedPrices = applyPriceShock(prices, dropFraction);
+    const stressedHF = computeUnifiedHealthFactor(positions, shockedPrices);
+    if (stressedHF < LIQUIDATION_HF) {
+      return dropFraction;
+    }
+  }
+  return Infinity;
+}
+function computeContagionRisk(positions, prices) {
+  if (positions.length === 0) {
+    return { score: 0, cascadeThreshold: Infinity };
+  }
+  const baselineHF = computeUnifiedHealthFactor(positions, prices);
+  if (baselineHF < LIQUIDATION_HF) {
+    return { score: CONTAGION_SCORE_MAX, cascadeThreshold: 0 };
+  }
+  const cascadeThreshold = computeCascadeThreshold(positions, prices);
+  if (cascadeThreshold === Infinity) {
+    return { score: 0, cascadeThreshold: Infinity };
+  }
+  const score = Math.round((1 - cascadeThreshold / MAX_DROP_SCENARIO) * 100);
+  return {
+    score: Math.min(score, CONTAGION_SCORE_MAX),
+    cascadeThreshold
+  };
+}
+var UTILIZATION_EXCELLENT_CEILING = 0.3;
+var UTILIZATION_GOOD_CEILING = 0.5;
+var UTILIZATION_FAIR_CEILING = 0.75;
+var UTILIZATION_SCORE_FLOOR_EXCELLENT = 100;
+var UTILIZATION_SCORE_FLOOR_GOOD = 75;
+var UTILIZATION_SCORE_FLOOR_FAIR = 40;
+var UTILIZATION_SCORE_FLOOR_POOR = 10;
+var UTILIZATION_SCORE_FLOOR_MAXED = 0;
+var LIQUIDITY_RATIO_EXCEPTIONAL = 3;
+var WEIGHT_CREDIT_UTILIZATION = 0.4;
+var WEIGHT_LIQUIDITY_BUFFER = 0.35;
+var WEIGHT_DEBT_LOAD = 0.25;
+var _WEIGHT_SUM = WEIGHT_CREDIT_UTILIZATION + WEIGHT_LIQUIDITY_BUFFER + WEIGHT_DEBT_LOAD;
+function lerp(a, b, t) {
+  const clamped = Math.min(1, Math.max(0, t));
+  return a + (b - a) * clamped;
+}
+function scoreFromUtilization(utilization) {
+  if (utilization <= UTILIZATION_EXCELLENT_CEILING) {
+    const t2 = utilization / UTILIZATION_EXCELLENT_CEILING;
+    return Math.round(lerp(UTILIZATION_SCORE_FLOOR_EXCELLENT, UTILIZATION_SCORE_FLOOR_GOOD, t2));
+  }
+  if (utilization <= UTILIZATION_GOOD_CEILING) {
+    const t2 = (utilization - UTILIZATION_EXCELLENT_CEILING) / (UTILIZATION_GOOD_CEILING - UTILIZATION_EXCELLENT_CEILING);
+    return Math.round(lerp(UTILIZATION_SCORE_FLOOR_GOOD, UTILIZATION_SCORE_FLOOR_FAIR, t2));
+  }
+  if (utilization <= UTILIZATION_FAIR_CEILING) {
+    const t2 = (utilization - UTILIZATION_GOOD_CEILING) / (UTILIZATION_FAIR_CEILING - UTILIZATION_GOOD_CEILING);
+    return Math.round(lerp(UTILIZATION_SCORE_FLOOR_FAIR, UTILIZATION_SCORE_FLOOR_POOR, t2));
+  }
+  const t = (utilization - UTILIZATION_FAIR_CEILING) / (1 - UTILIZATION_FAIR_CEILING);
+  return Math.round(lerp(UTILIZATION_SCORE_FLOOR_POOR, UTILIZATION_SCORE_FLOOR_MAXED, t));
+}
+function scoreLiquidityBuffer(totalLiquidAssetsUSD, totalCreditUsedUSD) {
+  if (totalCreditUsedUSD === 0) {
+    return DSS_MAX;
+  }
+  const ratio = totalLiquidAssetsUSD / totalCreditUsedUSD;
+  if (ratio >= LIQUIDITY_RATIO_EXCEPTIONAL) {
+    return DSS_MAX;
+  }
+  return Math.round(ratio / LIQUIDITY_RATIO_EXCEPTIONAL * DSS_MAX);
+}
+function scoreDebtLoad(totalLiquidAssetsUSD, totalCreditLimitUSD, totalCreditUsedUSD) {
+  const totalWealth = totalLiquidAssetsUSD + totalCreditLimitUSD;
+  if (totalWealth === 0) {
+    return NEUTRAL_DSS;
+  }
+  const debtRatio = totalCreditUsedUSD / totalWealth;
+  return Math.round((1 - debtRatio) * DSS_MAX);
+}
+function hasUsableData(data) {
+  return data.totalLiquidAssetsUSD > 0 || data.totalCreditLimitUSD > 0 || data.totalCreditUsedUSD > 0;
+}
+function computeDebtServiceability(data) {
+  if (data === null) {
+    return {
+      score: NEUTRAL_DSS,
+      utilizationScore: NEUTRAL_DSS,
+      liquidityBufferScore: NEUTRAL_DSS,
+      debtLoadScore: NEUTRAL_DSS,
+      hasPlaidData: false
+    };
+  }
+  if (!hasUsableData(data)) {
+    return {
+      score: NEUTRAL_DSS,
+      utilizationScore: NEUTRAL_DSS,
+      liquidityBufferScore: NEUTRAL_DSS,
+      debtLoadScore: NEUTRAL_DSS,
+      hasPlaidData: true
+    };
+  }
+  const utilizationScore = scoreFromUtilization(data.totalCreditUtilization);
+  const liquidityBufferScore = scoreLiquidityBuffer(data.totalLiquidAssetsUSD, data.totalCreditUsedUSD);
+  const debtLoadScore = scoreDebtLoad(data.totalLiquidAssetsUSD, data.totalCreditLimitUSD, data.totalCreditUsedUSD);
+  const composite = utilizationScore * WEIGHT_CREDIT_UTILIZATION + liquidityBufferScore * WEIGHT_LIQUIDITY_BUFFER + debtLoadScore * WEIGHT_DEBT_LOAD;
+  return {
+    score: Math.min(DSS_MAX, Math.max(0, Math.round(composite))),
+    utilizationScore,
+    liquidityBufferScore,
+    debtLoadScore,
+    hasPlaidData: true
+  };
+}
+var TIER_REQUIREMENTS = [
+  {
+    tier: 1,
+    minUHF: HF_INSTITUTIONAL,
+    maxContagion: CONTAGION_THRESHOLD_TIER_1,
+    minDSS: DSS_THRESHOLD_TIER_1
+  },
+  {
+    tier: 2,
+    minUHF: HF_STRONG,
+    maxContagion: CONTAGION_THRESHOLD_TIER_2,
+    minDSS: DSS_THRESHOLD_TIER_2
+  },
+  {
+    tier: 3,
+    minUHF: HF_ADEQUATE,
+    maxContagion: CONTAGION_THRESHOLD_TIER_3,
+    minDSS: DSS_THRESHOLD_TIER_3
+  },
+  {
+    tier: 4,
+    minUHF: HF_WEAK,
+    maxContagion: CONTAGION_THRESHOLD_TIER_4,
+    minDSS: DSS_THRESHOLD_TIER_4
+  }
+];
+function assignTier(uhf, contagion, dss) {
+  for (const req of TIER_REQUIREMENTS) {
+    if (uhf > req.minUHF && contagion < req.maxContagion && dss > req.minDSS) {
+      return req.tier;
+    }
+  }
+  return TIER_MAX;
+}
+function computeCreditScore(positions, prices, plaidData) {
+  const uhf = computeUnifiedHealthFactor(positions, prices);
+  const { score: contagionRiskScore, cascadeThreshold } = computeContagionRisk(positions, prices);
+  const dss = computeDebtServiceability(plaidData);
+  const tier = assignTier(uhf, contagionRiskScore, dss.score);
+  const creditScore = {
+    unifiedHealthFactor: uhf,
+    tier,
+    debtServiceabilityScore: dss.score,
+    contagionRiskScore,
+    cascadeThreshold
+  };
+  return {
+    creditScore,
+    hasPlaidData: dss.hasPlaidData,
+    dssUtilizationScore: dss.utilizationScore,
+    dssLiquidityBufferScore: dss.liquidityBufferScore,
+    dssDebtLoadScore: dss.debtLoadScore
+  };
+}
+var tag = (addr) => keccak256(toBytes(addr)).slice(0, 12);
+function confGet(confHttp, runtime2, url, protocolName, subjectTag) {
   try {
     const response = confHttp.sendRequest(runtime2, {
       request: { url, method: "GET" },
       vaultDonSecrets: []
     }).result();
-    if (response.statusCode !== 200) {
-      runtime2.log(`[ConfidentialGuard] API returned ${response.statusCode}, using mock data`);
-      position = getMockAavePosition();
-    } else {
-      const rawData = JSON.parse(response.body.toString());
-      const hf = parseFloat(rawData.healthFactor ?? "999");
-      const collateral = parseFloat(rawData.totalCollateralMarketReferenceCurrency ?? "0");
-      const debt = parseFloat(rawData.totalDebtMarketReferenceCurrency ?? "0");
-      position = {
-        protocol: "Aave V3",
-        healthFactor: hf,
-        totalCollateralUSD: collateral,
-        totalDebtUSD: debt,
-        netPositionUSD: collateral - debt,
-        atRisk: hf < 1.5
-      };
+    if (!ok(response)) {
+      runtime2.log(`[PositionAggregator] Non-2xx (${response.statusCode}) from ${protocolName} for ${subjectTag}…`);
+      return null;
     }
-  } catch (err) {
-    runtime2.log(`[ConfidentialGuard] Confidential HTTP error: ${String(err)}`);
-    runtime2.log("[ConfidentialGuard] Falling back to mock position data");
-    position = getMockAavePosition();
+    return json(response);
+  } catch (err2) {
+    runtime2.log(`[PositionAggregator] HTTP error fetching ${protocolName} for ${subjectTag}…: ${String(err2)}`);
+    return null;
   }
-  runtime2.log(`[ConfidentialGuard] Protocol: ${position.protocol}`);
-  runtime2.log(`[ConfidentialGuard] Health Factor: ${position.healthFactor}`);
-  runtime2.log(`[ConfidentialGuard] Collateral: $${position.totalCollateralUSD}`);
-  runtime2.log(`[ConfidentialGuard] Debt: $${position.totalDebtUSD}`);
-  runtime2.log(`[ConfidentialGuard] At Risk: ${position.atRisk}`);
-  runtime2.log("[ConfidentialGuard] Step 2: Computing risk assessment...");
-  return computeRiskAssessment(position);
-};
-var initWorkflow = (config) => {
-  const cronCapability = new cre.capabilities.CronCapability;
-  return [
-    cre.handler(cronCapability.trigger({ schedule: config.schedule }), onCronTrigger)
+}
+function confPost(confHttp, runtime2, url, bodyJson, secretKey, secretNamespace) {
+  try {
+    const response = confHttp.sendRequest(runtime2, {
+      request: {
+        url,
+        method: "POST",
+        body: { case: "bodyString", value: bodyJson }
+      },
+      vaultDonSecrets: [{ key: secretKey, namespace: secretNamespace }]
+    }).result();
+    if (!ok(response)) {
+      runtime2.log(`[PositionAggregator] Non-2xx (${response.statusCode}) from Plaid`);
+      return null;
+    }
+    return json(response);
+  } catch (err2) {
+    runtime2.log(`[PositionAggregator] Plaid HTTP error: ${String(err2)}`);
+    return null;
+  }
+}
+function fetchAavePositions(confHttp, runtime2, subject, subjectTag) {
+  const url = `${runtime2.config.aaveApiUrl}/v1/users/${subject}`;
+  runtime2.log(`[PositionAggregator] Fetching Aave for ${subjectTag}…`);
+  const raw = confGet(confHttp, runtime2, url, "Aave", subjectTag);
+  if (raw === null)
+    return [];
+  const result = AaveAdapter.normalize(raw, {
+    chainId: 11155111,
+    useIndividualReserves: true
+  });
+  if (!result.ok) {
+    if (result.error.code !== ADAPTER_ERROR_CODES.NO_POSITIONS) {
+      runtime2.log(`[PositionAggregator] Aave adapter error: ${result.error.message}`);
+    }
+    return [];
+  }
+  runtime2.log(`[PositionAggregator] Aave: ${result.data.length} position(s)`);
+  return result.data;
+}
+function fetchMorphoPositions(confHttp, runtime2, subject, subjectTag) {
+  const url = `${runtime2.config.morphoApiUrl}/v1/users/${subject}/positions`;
+  runtime2.log(`[PositionAggregator] Fetching Morpho for ${subjectTag}…`);
+  const raw = confGet(confHttp, runtime2, url, "Morpho", subjectTag);
+  if (raw === null)
+    return [];
+  const result = MorphoAdapter.normalize(raw, {
+    chainId: 11155111
+  });
+  if (!result.ok) {
+    if (result.error.code !== ADAPTER_ERROR_CODES.NO_POSITIONS) {
+      runtime2.log(`[PositionAggregator] Morpho adapter error: ${result.error.message}`);
+    }
+    return [];
+  }
+  runtime2.log(`[PositionAggregator] Morpho: ${result.data.length} position(s)`);
+  return result.data;
+}
+function fetchCompoundPositions(confHttp, runtime2, subject, subjectTag) {
+  const url = `${runtime2.config.compoundApiUrl}/v1/accounts/${subject}`;
+  runtime2.log(`[PositionAggregator] Fetching Compound for ${subjectTag}…`);
+  const raw = confGet(confHttp, runtime2, url, "Compound", subjectTag);
+  if (raw === null)
+    return [];
+  const result = CompoundAdapter.normalize(raw, {
+    chainId: 11155111
+  });
+  if (!result.ok) {
+    if (result.error.code !== ADAPTER_ERROR_CODES.NO_POSITIONS) {
+      runtime2.log(`[PositionAggregator] Compound adapter error: ${result.error.message}`);
+    }
+    return [];
+  }
+  runtime2.log(`[PositionAggregator] Compound: ${result.data.length} position(s)`);
+  return result.data;
+}
+function fetchPlaidData(confHttp, runtime2) {
+  const body = JSON.stringify({
+    client_id: "{{secret.plaidClientId}}",
+    secret: "{{secret.plaidSecret}}"
+  });
+  const url = `${runtime2.config.plaidApiUrl}/accounts/balance/get`;
+  runtime2.log("[PositionAggregator] Fetching Plaid balance data");
+  const raw = confPost(confHttp, runtime2, url, body, runtime2.config.plaidSecretKey, runtime2.config.plaidSecretNamespace);
+  if (raw === null)
+    return null;
+  const result = PlaidAdapter.normalize(raw);
+  if (!result.ok) {
+    runtime2.log(`[PositionAggregator] Plaid adapter error: ${result.error.message}`);
+    return null;
+  }
+  runtime2.log(`[PositionAggregator] Plaid: ${result.data.accounts.length} account(s) aggregated`);
+  return result.data;
+}
+function aggregatePositions(runtime2, subject) {
+  const subjectTag = tag(subject);
+  runtime2.log(`[PositionAggregator] Starting aggregation for ${subjectTag}…`);
+  const confHttp = new ClientCapability2;
+  const aavePositions = fetchAavePositions(confHttp, runtime2, subject, subjectTag);
+  const morphoPositions = fetchMorphoPositions(confHttp, runtime2, subject, subjectTag);
+  const compoundPositions = fetchCompoundPositions(confHttp, runtime2, subject, subjectTag);
+  const plaidData = fetchPlaidData(confHttp, runtime2);
+  const positions = [
+    ...aavePositions,
+    ...morphoPositions,
+    ...compoundPositions
   ];
-};
+  runtime2.log(`[PositionAggregator] Aggregation complete: ` + `${positions.length} position(s), Plaid: ${plaidData !== null ? "ok" : "unavailable"}`);
+  return {
+    positions,
+    plaidData
+  };
+}
+var MINT_ATTESTATION_ABI = [
+  {
+    name: "mintAttestation",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "subject", type: "address" },
+      { name: "tier", type: "uint8" }
+    ],
+    outputs: []
+  }
+];
+var VALID_TIERS = [1, 2, 3, 4, 5];
+var ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+function mintAttestation(runtime2, subject, tier) {
+  if (!subject || subject === ZERO_ADDRESS) {
+    throw new Error("[AttestationMinter] Invalid subject: zero address");
+  }
+  if (!VALID_TIERS.includes(tier)) {
+    throw new Error(`[AttestationMinter] Invalid tier: ${tier}. Must be 1–5.`);
+  }
+  const contractAddress = runtime2.config.attestationContractAddress;
+  if (!contractAddress || contractAddress === ZERO_ADDRESS) {
+    throw new Error("[AttestationMinter] attestationContractAddress not configured");
+  }
+  const subjectTag = keccak256(toBytes(subject)).slice(0, 12);
+  runtime2.log(`[AttestationMinter] Minting tier ${tier} attestation ` + `for subject ${subjectTag}… on contract ${contractAddress}`);
+  const calldata = encodeFunctionData({
+    abi: MINT_ATTESTATION_ABI,
+    functionName: "mintAttestation",
+    args: [subject, tier]
+  });
+  runtime2.log(`[AttestationMinter] Calldata: ${calldata.slice(0, 18)}…`);
+  const report2 = runtime2.report(prepareReportRequest(calldata)).result();
+  runtime2.log("[AttestationMinter] Report signed by DON quorum");
+  const chainSelectorName = runtime2.config.chainSelectorName ?? "ethereum-testnet-sepolia";
+  const chainSelector = ClientCapability.SUPPORTED_CHAIN_SELECTORS[chainSelectorName];
+  if (!chainSelector) {
+    throw new Error(`[AttestationMinter] Unsupported chainSelectorName: ${chainSelectorName}`);
+  }
+  const evmClient = new ClientCapability(chainSelector);
+  const writeResult = evmClient.writeReport(runtime2, {
+    receiver: hexToBase64(contractAddress),
+    report: report2
+  }).result();
+  if (writeResult.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`[AttestationMinter] TX not confirmed for subject ${subjectTag}… ` + `— txStatus: ${TxStatus[writeResult.txStatus]}`);
+  }
+  runtime2.log(`[AttestationMinter] mintAttestation confirmed — ` + `subject: ${subjectTag}… tier: ${tier} txStatus: ${TxStatus[writeResult.txStatus]}`);
+  return {
+    txStatus: writeResult.txStatus,
+    subject,
+    tier
+  };
+}
+var tag2 = (addr) => keccak256(toBytes(addr)).slice(0, 12);
+var PERMISSION_GRANTED_TOPIC = keccak256(stringToBytes("PermissionGranted(address)"));
+var ETH_USD_FEED_SEPOLIA = "0x694AA1769357215DE4FAC081bf1f309aDC325306";
+var BTC_USD_FEED_SEPOLIA = "0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43";
+var LATEST_ROUND_DATA_ABI = [
+  {
+    name: "latestRoundData",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" }
+    ]
+  }
+];
+var WETH_ADDRESS_SEPOLIA = "0xdd13e55209fd76afe204dbda4007c227904f0a81";
+var WBTC_ADDRESS_SEPOLIA = "0x29f2d40b0605204364af54ec677bd022da425d03";
+function resolveEvmClient(runtime2) {
+  const chainSelectorName = runtime2.config.chainSelectorName;
+  const chainSelector = ClientCapability.SUPPORTED_CHAIN_SELECTORS[chainSelectorName];
+  if (!chainSelector) {
+    throw new Error(`[RiskEngineWorkflow] Unsupported chainSelectorName: ${chainSelectorName}`);
+  }
+  return new ClientCapability(chainSelector);
+}
+function extractSubjectFromLog(log, runtime2) {
+  if (log.topics.length < 2) {
+    runtime2.log("[RiskEngineWorkflow] Log missing indexed subject topic");
+    return null;
+  }
+  const topicHex = bytesToHex(log.topics[1]);
+  const address = `0x${topicHex.slice(-40)}`;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    runtime2.log(`[RiskEngineWorkflow] Could not parse subject from topic`);
+    return null;
+  }
+  return address;
+}
+function fetchChainlinkPrice(evmClient, runtime2, feedAddress, symbol2) {
+  try {
+    const calldata = encodeFunctionData({
+      abi: LATEST_ROUND_DATA_ABI,
+      functionName: "latestRoundData"
+    });
+    const reply = evmClient.callContract(runtime2, {
+      call: encodeCallMsg({
+        from: "0x0000000000000000000000000000000000000000",
+        to: feedAddress,
+        data: calldata
+      })
+    }).result();
+    if (reply.data.length === 0) {
+      runtime2.log(`[RiskEngineWorkflow] Empty callContract reply for ${symbol2} feed`);
+      return null;
+    }
+    const [, answer] = decodeAbiParameters([
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" }
+    ], bytesToHex(reply.data));
+    if (answer <= 0n) {
+      runtime2.log(`[RiskEngineWorkflow] Invalid ${symbol2} price`);
+      return null;
+    }
+    const priceWei = BigInt(answer) * 10000000000n;
+    runtime2.log(`[RiskEngineWorkflow] ${symbol2}/USD feed resolved`);
+    return priceWei;
+  } catch (err2) {
+    runtime2.log(`[RiskEngineWorkflow] Failed to fetch ${symbol2} price: ${String(err2)}`);
+    return null;
+  }
+}
+function createRiskEngineTrigger(config) {
+  const chainSelectorName = config.chainSelectorName;
+  const chainSelector = ClientCapability.SUPPORTED_CHAIN_SELECTORS[chainSelectorName];
+  if (!chainSelector) {
+    throw new Error(`[RiskEngineWorkflow] Unsupported chainSelectorName: ${chainSelectorName}`);
+  }
+  const evmClient = new ClientCapability(chainSelector);
+  return evmClient.logTrigger({
+    addresses: [hexToBase64(config.attestationContractAddress)],
+    topics: [
+      { values: [hexToBase64(PERMISSION_GRANTED_TOPIC)] }
+    ]
+  });
+}
+function riskEngineHandler(runtime2, log) {
+  runtime2.log("[RiskEngineWorkflow] ═══ Credit Assessment Started ═══");
+  const subject = extractSubjectFromLog(log, runtime2);
+  if (subject === null) {
+    runtime2.log("[RiskEngineWorkflow] Aborting: could not extract subject address");
+    return JSON.stringify({ ok: false, reason: "invalid_log" });
+  }
+  const subjectTag = tag2(subject);
+  runtime2.log(`[RiskEngineWorkflow] Subject: ${subjectTag}…`);
+  const { positions, plaidData } = aggregatePositions(runtime2, subject);
+  if (positions.length === 0 && plaidData === null) {
+    runtime2.log("[RiskEngineWorkflow] No positions or Plaid data — skipping mint");
+    return JSON.stringify({ ok: false, reason: "no_data", subjectTag });
+  }
+  const evmClient = resolveEvmClient(runtime2);
+  const ethPrice = fetchChainlinkPrice(evmClient, runtime2, ETH_USD_FEED_SEPOLIA, "ETH");
+  const btcPrice = fetchChainlinkPrice(evmClient, runtime2, BTC_USD_FEED_SEPOLIA, "BTC");
+  const rawPrices = {};
+  if (ethPrice !== null)
+    rawPrices[WETH_ADDRESS_SEPOLIA] = ethPrice;
+  if (btcPrice !== null)
+    rawPrices[WBTC_ADDRESS_SEPOLIA] = btcPrice;
+  if (Object.keys(rawPrices).length === 0) {
+    runtime2.log("[RiskEngineWorkflow] No prices available — aborting to prevent incorrect attestation");
+    return JSON.stringify({ ok: false, reason: "no_prices", subjectTag });
+  }
+  const prices = buildPriceMap(rawPrices);
+  runtime2.log("[RiskEngineWorkflow] Computing credit score inside TEE...");
+  const scoreDetails = computeCreditScore(positions, prices, plaidData);
+  runtime2.log(`[RiskEngineWorkflow] Credit assessment complete — ` + `tier=${scoreDetails.creditScore.tier} for ${subjectTag}…`);
+  try {
+    const mintResult = mintAttestation(runtime2, subject, scoreDetails.creditScore.tier);
+    runtime2.log(`[RiskEngineWorkflow] Attestation confirmed — ` + `tier=${mintResult.tier} txStatus=${TxStatus[mintResult.txStatus]} for ${subjectTag}…`);
+  } catch (err2) {
+    runtime2.log(`[RiskEngineWorkflow] Mint failed for ${subjectTag}…: ${String(err2)}`);
+    return JSON.stringify({
+      ok: false,
+      reason: "mint_failed",
+      subjectTag,
+      error: String(err2)
+    });
+  }
+  runtime2.log("[RiskEngineWorkflow] ═══ Credit Assessment Complete ═══");
+  return JSON.stringify({
+    ok: true,
+    subjectTag,
+    tier: scoreDetails.creditScore.tier
+  });
+}
+var tag3 = (addr) => keccak256(toBytes(addr)).slice(0, 12);
+var GUARDIAN_HF_FLOOR = 1.3;
+var ATTESTATION_MINTED_TOPIC = keccak256(stringToBytes("AttestationMinted(address,uint8,uint64)"));
+var GET_ATTESTATION_ABI = [
+  {
+    name: "getAttestation",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "subject", type: "address" }],
+    outputs: [
+      { name: "tier", type: "uint8" },
+      { name: "timestamp", type: "uint64" },
+      { name: "expiry", type: "uint64" },
+      { name: "active", type: "bool" },
+      { name: "exists", type: "bool" }
+    ]
+  }
+];
+var LATEST_ROUND_DATA_ABI2 = [
+  {
+    name: "latestRoundData",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" }
+    ]
+  }
+];
+var TRIGGER_GUARDIAN_ACTION_ABI = [
+  {
+    name: "triggerGuardianAction",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "destinationChain", type: "uint64" }
+    ],
+    outputs: []
+  }
+];
+var ETH_USD_FEED_SEPOLIA2 = "0x694AA1769357215DE4FAC081bf1f309aDC325306";
+var BTC_USD_FEED_SEPOLIA2 = "0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43";
+var WETH_ADDRESS_SEPOLIA2 = "0xdd13e55209fd76afe204dbda4007c227904f0a81";
+var WBTC_ADDRESS_SEPOLIA2 = "0x29f2d40b0605204364af54ec677bd022da425d03";
+var SCAN_BLOCK_WINDOW = 7200n;
+function discoverActiveSubjects(evmClient, runtime2) {
+  const contractAddress = runtime2.config.attestationContractAddress;
+  try {
+    const headerReply = evmClient.headerByNumber(runtime2, {}).result();
+    const blockNumberBytes = headerReply.header?.blockNumber?.absVal;
+    if (!blockNumberBytes || blockNumberBytes.length === 0) {
+      runtime2.log("[GuardianMonitor] Could not get latest block number");
+      return [];
+    }
+    const latestBlock = bytesToBigint(blockNumberBytes);
+    if (latestBlock === 0n) {
+      runtime2.log("[GuardianMonitor] Latest block is 0 — skipping scan");
+      return [];
+    }
+    const fromBlock = latestBlock > SCAN_BLOCK_WINDOW ? latestBlock - SCAN_BLOCK_WINDOW : 0n;
+    const logsReply = evmClient.filterLogs(runtime2, {
+      filterQuery: {
+        addresses: [hexToBase64(contractAddress)],
+        fromBlock: bigintToProtoBigInt(fromBlock),
+        toBlock: bigintToProtoBigInt(latestBlock),
+        topics: [{ topic: [hexToBase64(ATTESTATION_MINTED_TOPIC)] }]
+      }
+    }).result();
+    const subjects = [];
+    for (const log of logsReply.logs) {
+      if (log.topics.length < 2)
+        continue;
+      const subjectHex = bytesToHex(log.topics[1]);
+      const subject = `0x${subjectHex.slice(-40)}`;
+      if (/^0x[0-9a-fA-F]{40}$/.test(subject)) {
+        subjects.push(subject);
+      }
+    }
+    return [...new Set(subjects)];
+  } catch (err2) {
+    runtime2.log(`[GuardianMonitor] filterLogs error: ${String(err2)}`);
+    return [];
+  }
+}
+function fetchPrices(evmClient, runtime2) {
+  const rawPrices = {};
+  for (const [address, feed, symbol2] of [
+    [WETH_ADDRESS_SEPOLIA2, ETH_USD_FEED_SEPOLIA2, "ETH"],
+    [WBTC_ADDRESS_SEPOLIA2, BTC_USD_FEED_SEPOLIA2, "BTC"]
+  ]) {
+    try {
+      const calldata = encodeFunctionData({
+        abi: LATEST_ROUND_DATA_ABI2,
+        functionName: "latestRoundData"
+      });
+      const reply = evmClient.callContract(runtime2, {
+        call: encodeCallMsg({
+          from: "0x0000000000000000000000000000000000000000",
+          to: feed,
+          data: calldata
+        })
+      }).result();
+      if (reply.data.length > 0) {
+        const [, answer] = decodeAbiParameters([
+          { name: "roundId", type: "uint80" },
+          { name: "answer", type: "int256" },
+          { name: "startedAt", type: "uint256" },
+          { name: "updatedAt", type: "uint256" },
+          { name: "answeredInRound", type: "uint80" }
+        ], bytesToHex(reply.data));
+        if (answer > 0n) {
+          rawPrices[address] = BigInt(answer) * 10000000000n;
+          runtime2.log(`[GuardianMonitor] ${symbol2}/USD = ${rawPrices[address]}`);
+        }
+      }
+    } catch (err2) {
+      runtime2.log(`[GuardianMonitor] Failed to fetch ${symbol2} price: ${String(err2)}`);
+    }
+  }
+  return buildPriceMap(rawPrices);
+}
+function isAttestationActive(evmClient, runtime2, subject) {
+  try {
+    const contractAddress = runtime2.config.attestationContractAddress;
+    const calldata = encodeFunctionData({
+      abi: GET_ATTESTATION_ABI,
+      functionName: "getAttestation",
+      args: [subject]
+    });
+    const reply = evmClient.callContract(runtime2, {
+      call: encodeCallMsg({
+        from: "0x0000000000000000000000000000000000000000",
+        to: contractAddress,
+        data: calldata
+      })
+    }).result();
+    if (reply.data.length === 0)
+      return false;
+    const [, , , active, exists] = decodeAbiParameters([
+      { name: "tier", type: "uint8" },
+      { name: "timestamp", type: "uint64" },
+      { name: "expiry", type: "uint64" },
+      { name: "active", type: "bool" },
+      { name: "exists", type: "bool" }
+    ], bytesToHex(reply.data));
+    return Boolean(exists) && Boolean(active);
+  } catch {
+    return false;
+  }
+}
+function triggerCCIPRebalance(runtime2, evmClient, subject) {
+  const vaultAddress = runtime2.config.guardianVaultAddress;
+  const destChainName = runtime2.config.ccipDestinationChain;
+  const destChainSelector = ClientCapability.SUPPORTED_CHAIN_SELECTORS[destChainName];
+  if (destChainSelector === undefined) {
+    throw new Error(`[GuardianMonitor] Unknown ccipDestinationChain: "${destChainName}"`);
+  }
+  const subjectTag = tag3(subject);
+  runtime2.log(`[GuardianMonitor] Triggering CCIP rebalance for ${subjectTag}… ` + `→ chain ${destChainName} (selector: ${destChainSelector})`);
+  const calldata = encodeFunctionData({
+    abi: TRIGGER_GUARDIAN_ACTION_ABI,
+    functionName: "triggerGuardianAction",
+    args: [subject, destChainSelector]
+  });
+  const report2 = runtime2.report(prepareReportRequest(calldata)).result();
+  const writeResult = evmClient.writeReport(runtime2, {
+    receiver: hexToBase64(vaultAddress),
+    report: report2
+  }).result();
+  if (writeResult.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`[GuardianMonitor] CCIP rebalance not confirmed for ${subjectTag}… ` + `— txStatus: ${TxStatus[writeResult.txStatus]}`);
+  }
+  runtime2.log(`[GuardianMonitor] CCIP guardian action confirmed for ${subjectTag}…`);
+  return true;
+}
+function createGuardianMonitorTrigger(config) {
+  const cronCap = new CronCapability;
+  return cronCap.trigger({ schedule: config.guardianSchedule });
+}
+function guardianMonitorHandler(runtime2, _payload) {
+  runtime2.log("[GuardianMonitor] ═══ Guardian Scan Started ═══");
+  runtime2.log(`[GuardianMonitor] Time: ${runtime2.now().toISOString()}`);
+  if (HF_CRITICAL >= GUARDIAN_HF_FLOOR) {
+    throw new Error(`[GuardianMonitor] Config error: HF_CRITICAL (${HF_CRITICAL}) ` + `must be < GUARDIAN_HF_FLOOR (${GUARDIAN_HF_FLOOR})`);
+  }
+  const chainSelectorName = runtime2.config.chainSelectorName;
+  const chainSelector = ClientCapability.SUPPORTED_CHAIN_SELECTORS[chainSelectorName];
+  if (!chainSelector) {
+    throw new Error(`[GuardianMonitor] Unsupported chainSelectorName: ${chainSelectorName}`);
+  }
+  const evmClient = new ClientCapability(chainSelector);
+  const subjects = discoverActiveSubjects(evmClient, runtime2);
+  runtime2.log(`[GuardianMonitor] Active subjects to scan: ${subjects.length}`);
+  if (subjects.length === 0) {
+    runtime2.log("[GuardianMonitor] No active subjects — scan complete");
+    return JSON.stringify({ ok: true, scanned: 0, refreshed: 0, critical: 0 });
+  }
+  const prices = fetchPrices(evmClient, runtime2);
+  if (Object.keys(prices).length === 0) {
+    runtime2.log("[GuardianMonitor] No prices available — aborting scan to prevent false triggers");
+    return JSON.stringify({ ok: false, reason: "no_prices", scanned: 0, refreshed: 0, critical: 0 });
+  }
+  let refreshed = 0;
+  let critical = 0;
+  for (const subject of subjects) {
+    const subjectTag = tag3(subject);
+    runtime2.log(`[GuardianMonitor] Checking subject: ${subjectTag}…`);
+    if (!isAttestationActive(evmClient, runtime2, subject)) {
+      runtime2.log(`[GuardianMonitor] ${subjectTag}…: no active attestation, skipping`);
+      continue;
+    }
+    const { positions, plaidData } = aggregatePositions(runtime2, subject);
+    if (positions.length === 0) {
+      runtime2.log(`[GuardianMonitor] ${subjectTag}…: no positions, skipping`);
+      continue;
+    }
+    const scoreDetails = computeCreditScore(positions, prices, plaidData);
+    const { unifiedHealthFactor, tier } = scoreDetails.creditScore;
+    runtime2.log(`[GuardianMonitor] ${subjectTag}…: UHF=${unifiedHealthFactor.toFixed(4)} tier=${tier}`);
+    if (unifiedHealthFactor < HF_CRITICAL) {
+      runtime2.log(`[GuardianMonitor] CRITICAL: ${subjectTag}… HF=${unifiedHealthFactor.toFixed(4)} ` + `— dispatching CCIP rebalance to ${runtime2.config.ccipDestinationChain}`);
+      try {
+        triggerCCIPRebalance(runtime2, evmClient, subject);
+      } catch (err2) {
+        runtime2.log(`[GuardianMonitor] CCIP rebalance failed for ${subjectTag}…: ${String(err2)}`);
+      }
+      critical++;
+    } else if (unifiedHealthFactor < GUARDIAN_HF_FLOOR) {
+      runtime2.log(`[GuardianMonitor] HF degraded for ${subjectTag}… ` + `(${unifiedHealthFactor.toFixed(4)} < ${GUARDIAN_HF_FLOOR}) — refreshing attestation`);
+      try {
+        mintAttestation(runtime2, subject, scoreDetails.creditScore.tier);
+        runtime2.log(`[GuardianMonitor] Attestation refreshed for ${subjectTag}…`);
+        refreshed++;
+      } catch (err2) {
+        runtime2.log(`[GuardianMonitor] Failed to refresh attestation for ${subjectTag}…: ${String(err2)}`);
+      }
+    } else {
+      runtime2.log(`[GuardianMonitor] ${subjectTag}…: HF healthy, no action needed`);
+    }
+  }
+  runtime2.log(`[GuardianMonitor] ═══ Scan Complete — ` + `scanned=${subjects.length} refreshed=${refreshed} critical=${critical} ═══`);
+  return JSON.stringify({
+    ok: true,
+    scanned: subjects.length,
+    refreshed,
+    critical
+  });
+}
+function initWorkflow(config) {
+  return [
+    handler(createRiskEngineTrigger(config), riskEngineHandler),
+    handler(createGuardianMonitorTrigger(config), guardianMonitorHandler)
+  ];
+}
 async function main() {
   const runner = await Runner.newRunner({ configSchema });
   await runner.run(initWorkflow);
 }
-main().catch(sendErrorResponse);
+await main().catch(sendErrorResponse);
 export {
   main
 };

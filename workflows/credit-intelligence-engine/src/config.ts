@@ -21,6 +21,10 @@ const evmAddress = z
 
 const nonEmptyString = z.string().min(1)
 
+// z.string().url() uses the WHATWG URL constructor which is unavailable in
+// the Javy/QuickJS WASM runtime. Use a regex that covers http/https instead.
+const httpUrl = z.string().regex(/^https?:\/\/.+/, 'must be a valid http/https URL')
+
 // Derive valid chain names from the SDK so this stays in sync automatically.
 const SUPPORTED_CHAINS = Object.keys(
   EVMClient.SUPPORTED_CHAIN_SELECTORS,
@@ -48,13 +52,13 @@ export const configSchema = z.object({
   // ── DeFi Protocol API endpoints ───────────────────────────
   // Queried via ConfidentialHTTPClient inside the TEE.
   // Pattern: /v1/users/{address}/summary
-  aaveApiUrl: z.string().url('aaveApiUrl must be a valid URL'),
-  morphoApiUrl: z.string().url('morphoApiUrl must be a valid URL'),
-  compoundApiUrl: z.string().url('compoundApiUrl must be a valid URL'),
+  aaveApiUrl: httpUrl,
+  morphoApiUrl: httpUrl,
+  compoundApiUrl: httpUrl,
 
   // ── TradFi (Plaid) ────────────────────────────────────────
   // Base URL for Plaid /accounts/balance/get
-  plaidApiUrl: z.string().url('plaidApiUrl must be a valid URL'),
+  plaidApiUrl: httpUrl,
   // Vault DON secret key for Plaid client_id/secret injection
   plaidSecretKey: nonEmptyString,
   plaidSecretNamespace: nonEmptyString,

@@ -1,6 +1,6 @@
 {
-  "attestationContractAddress": "0x0000000000000000000000000000000000000000",
-  "guardianVaultAddress": "0x0000000000000000000000000000000000000000",
+  "attestationContractAddress": "0x213f4f61448c062cFBEC012Ce81008a8EFf35E05",
+  "guardianVaultAddress": "0x607A1d43BAcE9Ef8C370102750eec33b1A97198C",
   "chainSelectorName": "ethereum-testnet-sepolia",
   "ccipDestinationChain": "ethereum-testnet-sepolia-base-1",
   "aaveApiUrl": "https://aave-api-v2.aave.com",
