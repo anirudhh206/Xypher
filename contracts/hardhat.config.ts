@@ -9,7 +9,7 @@ dotenv.config()
 // ─────────────────────────────────────────────────────────────────────────────
 const DEPLOYER_PRIVATE_KEY  = process.env['DEPLOYER_PRIVATE_KEY']  ?? ''
 const ETHERSCAN_API_KEY     = process.env['ETHERSCAN_API_KEY']     ?? ''
-const BASESCAN_API_KEY      = process.env['BASESCAN_API_KEY']      ?? ''
+
 const SEPOLIA_RPC_URL       = process.env['SEPOLIA_RPC_URL']       ?? ''
 const BASE_SEPOLIA_RPC_URL  = process.env['BASE_SEPOLIA_RPC_URL']  ?? ''
 
@@ -61,17 +61,23 @@ const config: HardhatUserConfig = {
   },
 
   // ── Etherscan verification ───────────────────────────────────────────────
+  // Using Etherscan v2 API (single key covers all chains via chainId param)
   etherscan: {
-    apiKey: {
-      sepolia:      ETHERSCAN_API_KEY,
-      baseSepolia:  BASESCAN_API_KEY,
-    },
+    apiKey: ETHERSCAN_API_KEY,
     customChains: [
       {
-        network:    'baseSepolia',
+        network:    'sepolia',
+        chainId:    11155111,
+        urls: {
+          apiURL:     'https://api.etherscan.io/v2/api?chainid=11155111',
+          browserURL: 'https://sepolia.etherscan.io',
+        },
+      },
+      {
+        network:    'base-sepolia',
         chainId:    84532,
         urls: {
-          apiURL:     'https://api-sepolia.basescan.org/api',
+          apiURL:     'https://api.etherscan.io/v2/api?chainid=84532',
           browserURL: 'https://sepolia.basescan.org',
         },
       },
