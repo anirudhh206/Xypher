@@ -3,12 +3,13 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { parseEther } from "viem";
-import { useAccount, useConnect, useDisconnect, useWriteContract } from "wagmi";
+import { useAccount, useConnect, useDisconnect, useReadContract, useWriteContract } from "wagmi";
 import { injected } from "wagmi/connectors";
 import {
   CONTRACTS,
   ATTESTATION_ABI,
   LENDER_ABI,
+  OWNABLE_ABI,
   TIER_NAMES,
   TIER_COLORS,
   SEPOLIA_EXPLORER,
@@ -491,275 +492,487 @@ function PositionsTab({
 // ATTESTATION TAB
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AttestationTab({ attestation }: { attestation: ReturnType<typeof useAttestation> }) {
-  const { mutate: grantPermission } = useWriteContract();
-  const [isPending, setIsPending] = useState(false);
-  const [txError, setTxError] = useState<string | null>(null);
+function AttestationTab({
+  attestation,
+  connectedAddress,
+}: {
+  attestation: ReturnType<typeof useAttestation>;
+  connectedAddress: string | undefined;
+}) {
+  // ── on-chain reads ────────────────────────────────────────────────────────
+  const { data: workflowAddressData, refetch: refetchWorkflow } = useReadContract({
+    address: CONTRACTS.attestation,
+    abi: ATTESTATION_ABI,
+    functionName: "workflowAddress",
+    query: { refetchInterval: 8_000 },
+  });
+  const { data: ownerData } = useReadContract({
+    address: CONTRACTS.attestation,
+    abi: OWNABLE_ABI,
+    functionName: "owner",
+    query: { staleTime: 120_000 },
+  });
+  const { data: hasPermissionData, refetch: refetchPermission } = useReadContract({
+    address: CONTRACTS.attestation,
+    abi: ATTESTATION_ABI,
+    functionName: "hasPermission",
+    args: connectedAddress ? [connectedAddress as `0x${string}`] : undefined,
+    query: { enabled: !!connectedAddress, refetchInterval: 8_000 },
+  });
 
+  const workflowAddress = (workflowAddressData ?? "") as string;
+  const contractOwner = (ownerData ?? "") as string;
+  const hasPermission = Boolean(hasPermissionData);
+  const ZERO = "0x0000000000000000000000000000000000000000";
+
+  const isOwner =
+    !!connectedAddress &&
+    !!contractOwner &&
+    connectedAddress.toLowerCase() === contractOwner.toLowerCase();
+
+  const isWorkflowOperator =
+    !!connectedAddress &&
+    workflowAddress !== ZERO &&
+    workflowAddress !== "" &&
+    connectedAddress.toLowerCase() === workflowAddress.toLowerCase();
+
+  // ── write hooks ───────────────────────────────────────────────────────────
+  const { mutate: grantWrite } = useWriteContract();
+  const { mutate: activateWrite } = useWriteContract();
+  const { mutate: mintWrite } = useWriteContract();
+
+  // ── local state ───────────────────────────────────────────────────────────
+  const [grantPending, setGrantPending] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
+
+  const [activatePending, setActivatePending] = useState(false);
+  const [activateError, setActivateError] = useState<string | null>(null);
+  const [activateSuccess, setActivateSuccess] = useState(false);
+
+  const [mintTarget, setMintTarget] = useState(connectedAddress ?? "");
+  const [mintTier, setMintTier] = useState<number>(1);
+  const [mintPending, setMintPending] = useState(false);
+  const [mintError, setMintError] = useState<string | null>(null);
+  const [mintSuccess, setMintSuccess] = useState(false);
+
+  // ── handlers ──────────────────────────────────────────────────────────────
   const handleGrant = () => {
-    setIsPending(true);
-    setTxError(null);
-    grantPermission(
+    setGrantPending(true);
+    setGrantError(null);
+    grantWrite(
       { address: CONTRACTS.attestation, abi: ATTESTATION_ABI, functionName: "grantPermission" },
       {
-        onSuccess: (hash) => {
-          setIsPending(false);
-          console.log("grantPermission tx:", hash);
-          setTimeout(() => attestation.refetch(), 3_000);
+        onSuccess: () => {
+          setGrantPending(false);
+          setTimeout(() => { void refetchPermission(); void attestation.refetch(); }, 3_000);
         },
         onError: (err) => {
-          setIsPending(false);
-          setTxError((err as Error).message ?? String(err));
+          setGrantPending(false);
+          setGrantError((err as Error).message ?? String(err));
         },
       },
     );
   };
 
+  const handleActivate = () => {
+    if (!connectedAddress) return;
+    setActivatePending(true);
+    setActivateError(null);
+    setActivateSuccess(false);
+    activateWrite(
+      {
+        address: CONTRACTS.attestation,
+        abi: OWNABLE_ABI,
+        functionName: "setWorkflowAddress",
+        args: [connectedAddress as `0x${string}`],
+      },
+      {
+        onSuccess: () => {
+          setActivatePending(false);
+          setActivateSuccess(true);
+          setTimeout(() => { void refetchWorkflow(); }, 3_000);
+        },
+        onError: (err) => {
+          setActivatePending(false);
+          setActivateError((err as Error).message ?? "Transaction failed");
+        },
+      },
+    );
+  };
+
+  const handleMint = () => {
+    if (!mintTarget || !/^0x[0-9a-fA-F]{40}$/.test(mintTarget)) {
+      setMintError("Enter a valid 0x address");
+      return;
+    }
+    setMintPending(true);
+    setMintError(null);
+    setMintSuccess(false);
+    mintWrite(
+      {
+        address: CONTRACTS.attestation,
+        abi: ATTESTATION_ABI,
+        functionName: "mintAttestation",
+        args: [
+          mintTarget as `0x${string}`,
+          mintTier,
+          BigInt(Math.floor(Date.now() / 1000) + 86_400),
+        ],
+      },
+      {
+        onSuccess: () => {
+          setMintPending(false);
+          setMintSuccess(true);
+          setTimeout(() => { void attestation.refetch(); }, 3_000);
+        },
+        onError: (err) => {
+          setMintPending(false);
+          const msg = (err as Error).message ?? "Mint failed";
+          if (msg.includes("SubjectNotPermitted"))
+            setMintError("Subject has not called grantPermission() — they must grant access first.");
+          else if (msg.includes("MintTooFrequent"))
+            setMintError("Mint cooldown active (6h). Wait before minting again for this address.");
+          else if (msg.includes("NotAuthorized"))
+            setMintError("Your wallet is not the workflow operator. Complete Step 2 first.");
+          else
+            setMintError(msg);
+        },
+      },
+    );
+  };
+
+  // ── shared style helpers ──────────────────────────────────────────────────
+  const stepCard = (done: boolean): React.CSSProperties => ({
+    padding: "16px 20px",
+    marginBottom: "12px",
+    background: done ? "rgba(16,185,129,0.06)" : "rgba(8,145,178,0.05)",
+    border: `1px solid ${done ? "rgba(16,185,129,0.2)" : "rgba(8,145,178,0.15)"}`,
+    borderRadius: "6px",
+  });
+
+  const btn = (active: boolean, color = "var(--cyan)"): React.CSSProperties => ({
+    padding: "10px 18px",
+    background: !active
+      ? "var(--muted)"
+      : color === "indigo"
+        ? "linear-gradient(135deg,#6366f1,#8b5cf6)"
+        : "linear-gradient(135deg,var(--cyan),#06b6d4)",
+    border: "none",
+    color: "#ffffff",
+    fontWeight: 700,
+    cursor: active ? "pointer" : "wait",
+    fontSize: "11px",
+    letterSpacing: "0.08em",
+    textTransform: "uppercase" as const,
+    borderRadius: "4px",
+    whiteSpace: "nowrap" as const,
+  });
+
+  const errBox = (msg: string | null) =>
+    msg ? (
+      <div style={{ marginTop: "8px", padding: "8px 12px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "4px", fontSize: "11px", color: "#ef4444", fontFamily: "Space Mono,monospace", wordBreak: "break-all" }}>
+        {msg}
+      </div>
+    ) : null;
+
+  const okBox = (msg: string) => (
+    <div style={{ marginTop: "8px", padding: "8px 12px", background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.2)", borderRadius: "4px", fontSize: "11px", color: "#10b981" }}>
+      ✓ {msg}
+    </div>
+  );
+
+  const badge = (done: boolean, label: string) => (
+    <span style={{ fontSize: "10px", fontWeight: 700, padding: "2px 8px", borderRadius: "9999px", background: done ? "rgba(16,185,129,0.15)" : "rgba(8,145,178,0.1)", color: done ? "#10b981" : "var(--muted)", letterSpacing: "0.06em", textTransform: "uppercase" }}>
+      {done ? "✓ Done" : label}
+    </span>
+  );
+
+  // ── loading ───────────────────────────────────────────────────────────────
   if (attestation.isLoading) {
-    return (
-      <div style={{ padding: "24px", color: "var(--muted)" }}>
-        ⏳ Reading attestation from contract…
-      </div>
-    );
+    return <div style={{ padding: "24px", color: "var(--muted)" }}>Reading contract…</div>;
   }
 
-  if (attestation.isError) {
+  // ── valid attestation view ────────────────────────────────────────────────
+  if (attestation.isValid) {
+    const expiryDate = new Date(Number(attestation.expiry) * 1000);
+    const expired = Date.now() > expiryDate.getTime();
     return (
-      <div style={{ padding: "24px" }}>
-        <div
-          style={{
-            padding: "16px",
-            background: "rgba(239,68,68,0.08)",
-            border: "1px solid rgba(239,68,68,0.2)",
-            borderRadius: "6px",
-            marginBottom: "16px",
-          }}
-        >
-          <div style={{ fontSize: "13px", color: "#ef4444", fontWeight: 600, marginBottom: "4px" }}>
-            ❌ Contract Read Error
+      <div style={{ padding: "24px", maxWidth: "560px" }}>
+        <div style={{ padding: "32px", background: attestation.tier <= 2 ? "rgba(16,185,129,0.08)" : "rgba(249,115,22,0.08)", border: `1px solid ${attestation.tier <= 2 ? "rgba(16,185,129,0.3)" : "rgba(249,115,22,0.3)"}`, borderRadius: "8px", textAlign: "center", marginBottom: "16px" }}>
+          <div style={{ width: "80px", height: "80px", borderRadius: "50%", background: TIER_COLORS[attestation.tier], display: "flex", alignItems: "center", justifyContent: "center", color: "#ffffff", fontWeight: 700, fontSize: "36px", margin: "0 auto 12px" }}>
+            {attestation.tier}
           </div>
-          <div style={{ fontSize: "12px", color: "var(--slate2)", lineHeight: 1.6 }}>
-            Could not read the attestation contract. Ensure you are on Sepolia.
+          <div style={{ fontSize: "22px", fontWeight: 700, color: "var(--slate)", marginBottom: "4px" }}>{TIER_NAMES[attestation.tier]}</div>
+          <div style={{ fontSize: "13px", color: "var(--slate2)", marginBottom: "12px" }}>
+            Verified Credit Tier · {(getTierLTV(attestation.tier as 1|2|3|4|5) * 100).toFixed(0)}% LTV
           </div>
-          <div
-            style={{
-              marginTop: "8px",
-              fontSize: "11px",
-              fontFamily: "Space Mono,monospace",
-              color: "var(--muted)",
-            }}
-          >
-            {CONTRACTS.attestation}
+          {expired && <div style={{ marginBottom: "12px", padding: "6px 12px", background: "rgba(239,68,68,0.15)", borderRadius: "4px", fontSize: "11px", color: "#ef4444", fontWeight: 600 }}>⚠️ EXPIRED</div>}
+          <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "16px" }}>
+            {expired ? "Expired" : "Expires"}: {expiryDate.toLocaleString()}
           </div>
-        </div>
-        <a
-          href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ fontSize: "12px", color: "var(--cyan)" }}
-        >
-          View on Etherscan ↗
-        </a>
-        <button
-          onClick={() => attestation.refetch()}
-          style={{
-            marginLeft: "16px",
-            padding: "8px 16px",
-            background: "rgba(8,145,178,0.1)",
-            border: "1px solid var(--cyan)",
-            color: "var(--cyan)",
-            fontWeight: 600,
-            cursor: "pointer",
-            fontSize: "11px",
-            borderRadius: "4px",
-          }}
-        >
-          ↻ Retry
-        </button>
-      </div>
-    );
-  }
-
-  if (!attestation.isValid) {
-    return (
-      <div style={{ padding: "24px" }}>
-        <div
-          style={{
-            marginBottom: "16px",
-            padding: "16px",
-            background: "rgba(239,68,68,0.08)",
-            border: "1px solid rgba(239,68,68,0.2)",
-            borderRadius: "6px",
-          }}
-        >
-          <div style={{ fontSize: "13px", color: "#ef4444", fontWeight: 600, marginBottom: "4px" }}>
-            No Active Attestation
-          </div>
-          <div style={{ fontSize: "12px", color: "var(--slate2)", lineHeight: 1.6 }}>
-            Your on-chain credit attestation doesn&apos;t exist or has expired. Grant permission so
-            the Chainlink CRE workflow can assess your credit and mint a tier attestation.
-          </div>
-        </div>
-
-        <div
-          style={{
-            marginBottom: "16px",
-            padding: "12px",
-            background: "rgba(100,116,139,0.06)",
-            border: "1px solid rgba(100,116,139,0.12)",
-            borderRadius: "4px",
-            fontSize: "11px",
-            fontFamily: "Space Mono,monospace",
-            color: "var(--muted)",
-          }}
-        >
-          <div style={{ marginBottom: "4px", fontWeight: 600, color: "var(--slate2)" }}>
-            Debug
-          </div>
-          <div>Contract: {CONTRACTS.attestation}</div>
-          <div>isValid: false · tier: {attestation.tier} · expiry: {attestation.expiry.toString()}</div>
-          <a
-            href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "var(--cyan)", textDecoration: "underline", display: "block", marginTop: "4px" }}
-          >
-            View contract ↗
+          <a href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: "11px", color: "var(--cyan)", fontWeight: 600, textDecoration: "none" }}>
+            View Contract on Etherscan →
           </a>
         </div>
 
-        {txError && (
-          <div
-            style={{
-              marginBottom: "12px",
-              padding: "12px",
-              background: "rgba(239,68,68,0.08)",
-              border: "1px solid rgba(239,68,68,0.2)",
-              borderRadius: "4px",
-              fontSize: "12px",
-              color: "#ef4444",
-              fontFamily: "Space Mono,monospace",
-              lineHeight: 1.4,
-              wordBreak: "break-all",
-            }}
-          >
-            {txError}
-          </div>
+        {/* Admin mint panel always accessible for workflow operator */}
+        {isWorkflowOperator && (
+          <AdminMintPanel mintTarget={mintTarget} setMintTarget={setMintTarget} mintTier={mintTier} setMintTier={setMintTier} mintPending={mintPending} mintError={mintError} mintSuccess={mintSuccess} onMint={handleMint} />
         )}
-
-        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          <button
-            onClick={handleGrant}
-            disabled={isPending}
-            style={{
-              padding: "12px 20px",
-              background: isPending
-                ? "var(--muted)"
-                : "linear-gradient(135deg, var(--cyan), #06b6d4)",
-              border: "none",
-              color: "#ffffff",
-              fontWeight: 700,
-              cursor: isPending ? "wait" : "pointer",
-              fontSize: "12px",
-              letterSpacing: "0.1em",
-              textTransform: "uppercase",
-              borderRadius: "4px",
-            }}
-          >
-            {isPending ? "Sending transaction…" : "Grant Permission"}
-          </button>
-          <button
-            onClick={() => attestation.refetch()}
-            style={{
-              padding: "8px 16px",
-              background: "rgba(8,145,178,0.1)",
-              border: "1px solid rgba(8,145,178,0.25)",
-              color: "var(--cyan)",
-              fontWeight: 600,
-              cursor: "pointer",
-              fontSize: "11px",
-              textTransform: "uppercase",
-              borderRadius: "4px",
-            }}
-          >
-            ↻ Check Status
-          </button>
-        </div>
       </div>
     );
   }
 
-  const expiryDate = new Date(Number(attestation.expiry) * 1000);
-  const expired = Date.now() > expiryDate.getTime();
-
+  // ── no valid attestation ──────────────────────────────────────────────────
   return (
-    <div style={{ padding: "24px" }}>
-      <div
-        style={{
-          padding: "24px",
-          background: expired
-            ? "rgba(239,68,68,0.08)"
-            : attestation.tier <= 2
-              ? "rgba(16,185,129,0.08)"
-              : "rgba(249,115,22,0.08)",
-          border: expired
-            ? "1px solid rgba(239,68,68,0.3)"
-            : attestation.tier <= 2
-              ? "1px solid rgba(16,185,129,0.3)"
-              : "1px solid rgba(249,115,22,0.3)",
-          borderRadius: "8px",
-          textAlign: "center",
-        }}
-      >
-        <div
+    <div style={{ padding: "24px", maxWidth: "640px" }}>
+
+      {/* RPC error soft banner */}
+      {attestation.isContractError && (
+        <div style={{ marginBottom: "16px", padding: "10px 14px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)", borderRadius: "6px", fontSize: "11px", color: "#92400e", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span>⚠ Contract read failed — ensure MetaMask is on <strong>Sepolia</strong></span>
+          <button type="button" onClick={() => attestation.refetch()} style={{ marginLeft: "auto", padding: "4px 10px", background: "transparent", border: "1px solid rgba(245,158,11,0.4)", color: "#92400e", cursor: "pointer", fontSize: "10px", borderRadius: "3px" }}>↻ Retry</button>
+        </div>
+      )}
+
+      <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--slate)", marginBottom: "20px" }}>
+        No active attestation — complete the steps below
+      </div>
+
+      {/* ── STEP 1: Grant Permission ── */}
+      <div style={stepCard(hasPermission)}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+          <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--slate)" }}>Step 1 — Grant Permission</div>
+          {badge(hasPermission, "Required")}
+        </div>
+        <div style={{ fontSize: "11px", color: "var(--slate2)", marginBottom: "12px", lineHeight: 1.6 }}>
+          Authorises the workflow to assess and attest your wallet. Each address that wants an attestation must call this once.
+        </div>
+        {!hasPermission ? (
+          <>
+            <button type="button" onClick={handleGrant} disabled={grantPending} style={btn(!grantPending)}>
+              {grantPending ? "Sending…" : "Grant Permission"}
+            </button>
+            {errBox(grantError)}
+          </>
+        ) : (
+          okBox("Permission granted for this wallet")
+        )}
+      </div>
+
+      {/* ── STEP 2: Activate Admin (owner only, when workflow not set) ── */}
+      {(isOwner || isWorkflowOperator) && (
+        <div style={stepCard(isWorkflowOperator)}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+            <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--slate)" }}>Step 2 — Activate Workflow Operator</div>
+            {badge(isWorkflowOperator, "Owner Only")}
+          </div>
+          <div style={{ fontSize: "11px", color: "var(--slate2)", marginBottom: "4px", lineHeight: 1.6 }}>
+            Sets your wallet as the trusted workflow address so you can mint attestations directly (demo mode — normally done by the Chainlink CRE DON).
+          </div>
+          <div style={{ fontSize: "10px", color: "var(--muted)", marginBottom: "12px", fontFamily: "Space Mono,monospace" }}>
+            Current workflow: {workflowAddress === ZERO || workflowAddress === "" ? "not set" : workflowAddress}
+          </div>
+          {!isWorkflowOperator ? (
+            <>
+              <button type="button" onClick={handleActivate} disabled={activatePending} style={btn(!activatePending, "indigo")}>
+                {activatePending ? "Setting…" : "Set My Wallet as Workflow Operator"}
+              </button>
+              {activateSuccess && okBox("Workflow set — refreshing…")}
+              {errBox(activateError)}
+            </>
+          ) : (
+            okBox("Your wallet is the active workflow operator")
+          )}
+        </div>
+      )}
+
+      {/* ── STEP 3: Mint Attestation (workflow operator only) ── */}
+      {isWorkflowOperator && (
+        <AdminMintPanel
+          mintTarget={mintTarget}
+          setMintTarget={setMintTarget}
+          mintTier={mintTier}
+          setMintTier={setMintTier}
+          mintPending={mintPending}
+          mintError={mintError}
+          mintSuccess={mintSuccess}
+          onMint={handleMint}
+          stepNumber={3}
+        />
+      )}
+
+      {/* ── Fallback for non-owner: just show check-status ── */}
+      {!isOwner && !isWorkflowOperator && (
+        <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+          <button type="button" onClick={() => { void attestation.refetch(); void refetchPermission(); }} style={{ padding: "8px 16px", background: "rgba(8,145,178,0.1)", border: "1px solid rgba(8,145,178,0.25)", color: "var(--cyan)", fontWeight: 600, cursor: "pointer", fontSize: "11px", textTransform: "uppercase", borderRadius: "4px" }}>
+            ↻ Check Status
+          </button>
+        </div>
+      )}
+
+      {/* Debug row */}
+      <div style={{ marginTop: "20px", padding: "10px 12px", background: "rgba(100,116,139,0.05)", border: "1px solid rgba(100,116,139,0.1)", borderRadius: "4px", fontSize: "10px", fontFamily: "Space Mono,monospace", color: "var(--muted)", lineHeight: 1.8 }}>
+        <div>contract: <a href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>{CONTRACTS.attestation}</a></div>
+        <div>workflow: {workflowAddress || "…"} · owner: {contractOwner || "…"}</div>
+        <div>hasPermission: {String(hasPermission)} · isOwner: {String(isOwner)} · isOperator: {String(isWorkflowOperator)}</div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN MINT PANEL — only rendered when connected wallet === workflowAddress
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AdminMintPanel({
+  mintTarget,
+  setMintTarget,
+  mintTier,
+  setMintTier,
+  mintPending,
+  mintError,
+  mintSuccess,
+  onMint,
+  stepNumber,
+}: {
+  mintTarget: string;
+  setMintTarget: (v: string) => void;
+  mintTier: number;
+  setMintTier: (v: number) => void;
+  mintPending: boolean;
+  mintError: string | null;
+  mintSuccess: boolean;
+  onMint: () => void;
+  stepNumber?: number;
+}) {
+  const title = stepNumber ? `Step ${stepNumber} — Mint Attestation` : "Mint Attestation";
+  return (
+    <div
+      style={{
+        marginTop: stepNumber ? "0" : "24px",
+        padding: "16px 20px",
+        background: "rgba(99,102,241,0.06)",
+        border: "1px solid rgba(99,102,241,0.2)",
+        borderRadius: "6px",
+        marginBottom: "12px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+        <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--slate)" }}>{title}</div>
+        <span style={{ fontSize: "10px", fontWeight: 700, padding: "2px 8px", borderRadius: "9999px", background: "rgba(99,102,241,0.12)", color: "#6366f1", letterSpacing: "0.06em", textTransform: "uppercase" }}>Operator Only</span>
+      </div>
+      <div style={{ fontSize: "11px", color: "var(--slate2)", marginBottom: "16px", lineHeight: 1.6 }}>
+        Subject must have granted permission (Step 1) before you can mint for them.
+      </div>
+
+      <div style={{ display: "grid", gap: "12px" }}>
+        <div>
+          <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "6px" }}>
+            Subject Address
+          </div>
+          <input
+            type="text"
+            value={mintTarget}
+            onChange={(e) => setMintTarget(e.target.value)}
+            placeholder="0x…"
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              border: "1px solid rgba(99,102,241,0.3)",
+              background: "rgba(99,102,241,0.04)",
+              color: "var(--slate)",
+              fontFamily: "Space Mono,monospace",
+              fontSize: "12px",
+              borderRadius: "4px",
+              outline: "none",
+              boxSizing: "border-box",
+            }}
+          />
+        </div>
+
+        <div>
+          <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "6px" }}>
+            Credit Tier
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {([1, 2, 3, 4, 5] as const).map((t) => (
+              <button
+                type="button"
+                key={t}
+                onClick={() => setMintTier(t)}
+                style={{
+                  width: "40px",
+                  height: "40px",
+                  borderRadius: "50%",
+                  border: mintTier === t ? "2px solid #6366f1" : "1px solid rgba(99,102,241,0.2)",
+                  background: mintTier === t ? TIER_COLORS[t] : "transparent",
+                  color: mintTier === t ? "#ffffff" : TIER_COLORS[t],
+                  fontWeight: 700,
+                  fontSize: "14px",
+                  cursor: "pointer",
+                }}
+              >
+                {t}
+              </button>
+            ))}
+            <div style={{ fontSize: "12px", color: "var(--slate2)", alignSelf: "center", marginLeft: "8px" }}>
+              {TIER_NAMES[mintTier]}
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={onMint}
+          disabled={mintPending}
           style={{
-            width: "80px",
-            height: "80px",
-            borderRadius: "50%",
-            background: TIER_COLORS[attestation.tier],
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            padding: "11px 20px",
+            background: mintPending ? "var(--muted)" : "linear-gradient(135deg, #6366f1, #8b5cf6)",
+            border: "none",
             color: "#ffffff",
             fontWeight: 700,
-            fontSize: "36px",
-            margin: "0 auto 12px",
+            cursor: mintPending ? "wait" : "pointer",
+            fontSize: "12px",
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            borderRadius: "4px",
+            alignSelf: "flex-start",
           }}
         >
-          {attestation.tier}
-        </div>
-        <div style={{ fontSize: "20px", fontWeight: 700, color: "var(--slate)", marginBottom: "4px" }}>
-          {TIER_NAMES[attestation.tier]}
-        </div>
-        <div style={{ fontSize: "13px", color: "var(--slate2)", marginBottom: "12px" }}>
-          Verified Credit Tier · {(getTierLTV(attestation.tier) * 100).toFixed(0)}% LTV
-        </div>
-        {expired && (
+          {mintPending ? "Minting…" : `Mint Tier ${mintTier} Attestation`}
+        </button>
+
+        {mintSuccess && (
           <div
             style={{
-              marginBottom: "12px",
-              padding: "6px 12px",
-              background: "rgba(239,68,68,0.15)",
+              padding: "8px 12px",
+              background: "rgba(16,185,129,0.08)",
+              border: "1px solid rgba(16,185,129,0.25)",
+              borderRadius: "4px",
+              fontSize: "11px",
+              color: "#10b981",
+            }}
+          >
+            ✓ Attestation minted — refreshing in 3s…
+          </div>
+        )}
+        {mintError && (
+          <div
+            style={{
+              padding: "8px 12px",
+              background: "rgba(239,68,68,0.08)",
+              border: "1px solid rgba(239,68,68,0.25)",
               borderRadius: "4px",
               fontSize: "11px",
               color: "#ef4444",
-              fontWeight: 600,
+              fontFamily: "Space Mono,monospace",
+              wordBreak: "break-all",
             }}
           >
-            ⚠️ EXPIRED
+            ✗ {mintError}
           </div>
         )}
-        <div style={{ fontSize: "11px", color: "var(--muted)", marginBottom: "16px" }}>
-          {expired ? "Expired" : "Expires"}: {expiryDate.toLocaleString()}
-        </div>
-        <a
-          href={`${SEPOLIA_EXPLORER}/address/${CONTRACTS.attestation}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ fontSize: "11px", color: "var(--cyan)", fontWeight: 600, textDecoration: "none" }}
-        >
-          View Contract on Etherscan →
-        </a>
       </div>
     </div>
   );
@@ -1367,7 +1580,7 @@ export default function Dashboard() {
               <OverviewTab positions={positions} creditScore={creditScore} />
             )}
             {tab === "positions" && <PositionsTab positions={positions} />}
-            {tab === "attestation" && <AttestationTab attestation={attestation} />}
+            {tab === "attestation" && <AttestationTab attestation={attestation} connectedAddress={address} />}
             {tab === "borrow" && <BorrowTab loans={loans} ethPrice={ethPrice} />}
             {tab === "settings" && (
               <div style={{ padding: "24px", color: "var(--slate2)", fontSize: "13px" }}>

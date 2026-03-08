@@ -17,6 +17,8 @@ export const ATTESTATION_ABI = parseAbi([
   "function hasPermission(address subject) view returns (bool)",
   "function grantPermission() nonpayable",
   "function revokePermission() nonpayable",
+  "function mintAttestation(address subject, uint8 tier, uint64 expiresAt) nonpayable",
+  "function workflowAddress() view returns (address)",
 ]);
 
 export const LENDER_ABI = parseAbi([
@@ -45,6 +47,7 @@ export const NFT_ABI = parseAbi([
 
 export const OWNABLE_ABI = parseAbi([
   "function owner() view returns (address)",
+  "function setWorkflowAddress(address newWorkflow) nonpayable",
 ]);
 
 // ── Tier metadata ───────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
 
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useAccount, useReadContract } from "wagmi";
 import { parseAbi } from "viem";
 import {
@@ -226,33 +226,40 @@ export function useUserPositions(): UserPositions {
     };
   }, [address]);
 
-  // ── Build unified position list ───────────────────────────────────────────
-  const positions: MockPositionData[] = [];
+  // ── Build unified position list — memoised so the array reference is stable ─
+  const positions = useMemo<MockPositionData[]>(() => {
+    const result: MockPositionData[] = [];
 
-  if (aaveData && Array.isArray(aaveData) && aaveData.length >= 2) {
-    const [totalCollateralBase, totalDebtBase] = aaveData as unknown as bigint[];
-    // Aave returns USD amounts with 8 decimals
-    const collateralUSD = Number(totalCollateralBase) / 1e8;
-    const debtUSD = Number(totalDebtBase) / 1e8;
-
-    if (collateralUSD > 0.01 || debtUSD > 0.01) {
-      positions.push({
-        protocol: "aave",
-        chain: "sepolia",
-        collateralAsset: "Multi-Asset",
-        collateralAmount: totalCollateralBase,
-        debtAsset: "Multi-Asset",
-        debtAmount: totalDebtBase,
-        collateralUSD,
-        debtUSD,
-      });
+    if (aaveData && Array.isArray(aaveData) && aaveData.length >= 2) {
+      const [totalCollateralBase, totalDebtBase] = aaveData as unknown as bigint[];
+      const collateralUSD = Number(totalCollateralBase) / 1e8;
+      const debtUSD = Number(totalDebtBase) / 1e8;
+      if (collateralUSD > 0.01 || debtUSD > 0.01) {
+        result.push({
+          protocol: "aave",
+          chain: "sepolia",
+          collateralAsset: "Multi-Asset",
+          collateralAmount: totalCollateralBase,
+          debtAsset: "Multi-Asset",
+          debtAmount: totalDebtBase,
+          collateralUSD,
+          debtUSD,
+        });
+      }
     }
-  }
 
-  positions.push(...morphoPositions);
+    result.push(...morphoPositions);
+    return result;
+  }, [aaveData, morphoPositions]);
 
-  const totalCollateralUSD = positions.reduce((s, p) => s + p.collateralUSD, 0);
-  const totalDebtUSD = positions.reduce((s, p) => s + p.debtUSD, 0);
+  const totalCollateralUSD = useMemo(
+    () => positions.reduce((s, p) => s + p.collateralUSD, 0),
+    [positions],
+  );
+  const totalDebtUSD = useMemo(
+    () => positions.reduce((s, p) => s + p.debtUSD, 0),
+    [positions],
+  );
   const unifiedHealthFactor =
     totalDebtUSD > 0
       ? totalCollateralUSD / totalDebtUSD
@@ -275,41 +282,29 @@ export function useUserPositions(): UserPositions {
 export function useUserCreditScore(
   positions: MockPositionData[],
 ): UserCreditScore {
-  const [state, setState] = useState<UserCreditScore>({
-    loading: false,
-    error: null,
-    score: null,
-    fetchedAt: 0,
-  });
-
-  const calculate = useCallback(() => {
+  // useMemo is sufficient — no async work, no side-effects needed.
+  // The previous useState+useCallback+useEffect pattern caused an infinite
+  // render loop because `positions` is a new array reference every render.
+  return useMemo<UserCreditScore>(() => {
     if (positions.length === 0) {
-      setState({
-        loading: false,
-        error: null,
-        score: null,
-        fetchedAt: Date.now(),
-      });
-      return;
+      return { loading: false, error: null, score: null, fetchedAt: 0 };
     }
     try {
-      const score = calculateCreditScore(positions);
-      setState({ loading: false, error: null, score, fetchedAt: Date.now() });
+      return {
+        loading: false,
+        error: null,
+        score: calculateCreditScore(positions),
+        fetchedAt: Date.now(),
+      };
     } catch (err) {
-      setState({
+      return {
         loading: false,
         error: err instanceof Error ? err.message : "Failed to calculate score",
         score: null,
         fetchedAt: Date.now(),
-      });
+      };
     }
   }, [positions]);
-
-  useEffect(() => {
-    calculate();
-  }, [calculate]);
-
-  return state;
 }
 
 // ── useUserLoans ──────────────────────────────────────────────────────────────
@@ -395,7 +390,10 @@ export function useAttestation() {
     address: CONTRACTS.attestation,
     abi: ATTESTATION_ABI,
     functionName: "verifyAttestation",
-    args: address ? [address as `0x${string}`, 1] : undefined,
+    // minTier = 5 (worst tier) so ANY active attestation returns valid = true.
+    // The contract checks `tier <= minTier`, so lower minTier means stricter.
+    // We want to accept all tiers 1-5, hence minTier = 5.
+    args: address ? [address as `0x${string}`, 5] : undefined,
     query: { enabled: !!address, refetchInterval: 5_000 },
   });
 
@@ -404,5 +402,10 @@ export function useAttestation() {
   const tier = arr.length > 1 ? Number(arr[1]) : 0;
   const expiry = arr.length > 2 ? BigInt(arr[2] as bigint | number) : BigInt(0);
 
-  return { isValid, tier, expiry, isLoading, isError, refetch };
+  // isContractError = true means the RPC call itself failed (wrong network,
+  // contract not deployed, transient RPC error). We keep it separate so the
+  // UI can show a soft hint without blocking the grant-permission flow.
+  // isError caused by "no attestation" can't happen — verifyAttestation is a
+  // pure view function that never reverts; it just returns (false, 0, 0).
+  return { isValid, tier, expiry, isLoading, isContractError: isError, refetch };
 }
