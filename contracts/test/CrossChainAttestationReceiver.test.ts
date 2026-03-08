@@ -21,10 +21,13 @@ async function setup() {
     sepoliaAttestation.address
   );
 
+  const latestBlock = await ethers.provider.getBlock('latest');
+  const evmNow = latestBlock!.timestamp;
+
   const encode = (wallet: string, tier: number, action: number, expiry?: number) =>
     ethers.AbiCoder.defaultAbiCoder().encode(
       ["uint8", "address", "uint8", "uint64"],
-      [action, wallet, tier, expiry ?? Math.floor(Date.now() / 1000) + YEAR]
+      [action, wallet, tier, expiry ?? evmNow + YEAR]
     );
 
   const deliver = (wallet: string, tier: number, action = 1, expiry?: number) =>
@@ -201,7 +204,8 @@ describe("CrossChainAttestationReceiver", () => {
 
     it("returns invalid after expiry", async () => {
       const { receiver, rando, deliver } = await setup();
-      const shortExpiry = Math.floor(Date.now() / 1000) + 60;
+      const block = await ethers.provider.getBlock('latest');
+      const shortExpiry = block!.timestamp + 60;
       await deliver(rando.address, 1, 1, shortExpiry);
       await time.increase(120);
       const [valid] = await receiver.verifyAttestation(rando.address, 4);

@@ -188,7 +188,8 @@ describe("CreditIdentityNFT", () => {
       const tokenId = await nft.tokenOf(user1.address);
 
       await time.increase(6 * 60 * 60 + 1);
-      const expiry = Math.floor(Date.now() / 1000) + YEAR * 2;
+      const block1 = await ethers.provider.getBlock('latest');
+      const expiry = block1!.timestamp + YEAR * 2;
       await attestation.connect(workflow).mintAttestation(user1.address, 3, expiry);
       await nft.syncTier(user1.address);
 
@@ -202,8 +203,9 @@ describe("CreditIdentityNFT", () => {
       const tokenId = await nft.tokenOf(user1.address);
 
       await time.increase(6 * 60 * 60 + 1);
-      const expiry = Math.floor(Date.now() / 1000) + YEAR * 2;
-      await attestation.connect(workflow).mintAttestation(user1.address, 3, expiry);
+      const block2 = await ethers.provider.getBlock('latest');
+      const expiry2 = block2!.timestamp + YEAR * 2;
+      await attestation.connect(workflow).mintAttestation(user1.address, 3, expiry2);
       await expect(nft.syncTier(user1.address))
         .to.emit(nft, "CreditIdentityUpdated")
         .withArgs(tokenId, 1, 3);
