@@ -5,12 +5,27 @@
     "deployer": "0x683a17159E7888d40106C52C55B35a4B4b05eFbD",
     "deployedAt": "2026-03-07T20:14:03.340Z",
     "attestationBlock": 10404450,
-    "vaultBlock": 10404452
+    "vaultBlock": 10404452,
+    "lender": "0x5718b01d28dA26dBDB0C534A26E2dc8c756B7288",
+    "lenderBlock": 10406794,
+    "lenderDeployedAt": "2026-03-08T05:26:14.223Z",
+    "nft": "0x8208ebBB6DF76fB8998A339861FaF41ADD7A70e1",
+    "nftBlock": 10406798,
+    "nftDeployedAt": "2026-03-08T05:27:37.849Z",
+    "ccipRouterSet": "0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59",
+    "broadcastPool": "0.02",
+    "broadcastConfiguredAt": "2026-03-08T05:36:13.563Z",
+    "broadcastDestinations": [
+      "10344971235874465080"
+    ]
   },
   "baseSepolia": {
-    "receiver": null,
-    "deployer": null,
-    "deployedAt": null,
-    "receiverBlock": null
+    "receiver": "0x021cBE5e32F61559A52262F0d281928C28760Df3",
+    "deployer": "0x683a17159E7888d40106C52C55B35a4B4b05eFbD",
+    "deployedAt": "2026-03-08T05:31:19.671Z",
+    "receiverBlock": 38589796,
+    "attestationReceiver": "0x10c6e8c1A1a44289dd26d871233604dB18D5f97a",
+    "attestationReceiverBlock": 38589820,
+    "attestationReceiverDeployedAt": "2026-03-08T05:32:00.000Z"
   }
 }
