@@ -1,6 +1,4 @@
 import { parseAbi } from "viem";
-
-// ── Deployed contract addresses (Sepolia) ──────────────────────────────────
 export const CONTRACTS = {
   attestation: "0x213f4f61448c062cFBEC012Ce81008a8EFf35E05" as const,
   lender:      "0x5718b01d28dA26dBDB0C534A26E2dc8c756B7288" as const,
@@ -10,8 +8,6 @@ export const CONTRACTS = {
   btcUsdFeed:  "0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43" as const,
   ccipReceiver: "0x021cBE5e32F61559A52262F0d281928C28760Df3" as const,
 };
-
-// ── ABIs ───────────────────────────────────────────────────────────────────
 export const ATTESTATION_ABI = parseAbi([
   "function verifyAttestation(address subject, uint8 minTier) view returns (bool valid, uint8 tier, uint64 expiry)",
   "function hasPermission(address subject) view returns (bool)",
@@ -22,18 +18,14 @@ export const ATTESTATION_ABI = parseAbi([
 ]);
 
 export const LENDER_ABI = parseAbi([
-  // Pool stats
   "function getPoolStats() view returns (uint256 liquidity, uint256 borrowed, uint256 available, uint256 utilisationBps)",
-  // Per-user position (real on-chain data)
   "function getPosition(address borrower) view returns (uint256 collateral, uint256 borrowed, uint256 interest, uint8 tier, uint256 healthFactor)",
   "function getMaxBorrow(address borrower) view returns (uint256 maxETH, uint8 tier)",
   "function getHealthFactor(address borrower) view returns (uint256)",
-  // Actions
   "function depositCollateral() payable",
   "function withdrawCollateral(uint256 amount) nonpayable",
   "function borrow(uint256 amount) nonpayable",
   "function repay() payable",
-  // Config
   "function tierRates(uint8 tier) view returns (uint256)",
 ]);
 
@@ -49,8 +41,6 @@ export const OWNABLE_ABI = parseAbi([
   "function owner() view returns (address)",
   "function setWorkflowAddress(address newWorkflow) nonpayable",
 ]);
-
-// ── Tier metadata ───────────────────────────────────────────────────────────
 export const TIER_NAMES: Record<number, string> = {
   1: "Sovereign",
   2: "Assured",

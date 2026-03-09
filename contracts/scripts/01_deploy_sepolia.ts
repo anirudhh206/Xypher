@@ -2,20 +2,10 @@ import hre from 'hardhat'
 import { writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 
-// ── Sepolia Chainlink Addresses ───────────────────────────────────────────────
-// Source: https://docs.chain.link/ccip/supported-networks/v1_2_0/testnet
-// Source: https://docs.chain.link/data-feeds/price-feeds/addresses
 const SEPOLIA_CCIP_ROUTER    = '0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59'
 const SEPOLIA_ETH_USD_FEED   = '0x694AA1769357215DE4FAC081bf1f309aDC325306'
-
-// CCIP chain selectors (for post-deploy configuration reference)
 const SEPOLIA_CHAIN_SELECTOR = 16015286601757825753n
-
-// Guardian pool initial funding: 0.05 ETH covers ~5 CCIP messages
-// CCIP fee on testnet ~0.005-0.01 ETH per message
 const GUARDIAN_POOL_INITIAL_FUNDING = hre.ethers.parseEther('0.05')
-
-// ── Deployment Record ─────────────────────────────────────────────────────────
 const DEPLOYMENTS_FILE = join(__dirname, '..', 'deployments.json')
 
 interface DeploymentsRecord {
@@ -48,8 +38,6 @@ function saveDeployments(data: DeploymentsRecord): void {
   writeFileSync(DEPLOYMENTS_FILE, JSON.stringify(data, null, 2))
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
-
 async function main(): Promise<void> {
   const { ethers, network } = hre
 
@@ -72,8 +60,6 @@ async function main(): Promise<void> {
   const deployerBalance = await ethers.provider.getBalance(deployerAddress)
   console.log(`Balance:  ${ethers.formatEther(deployerBalance)} ETH`)
   console.log()
-
-  // Ensure the deployer has enough ETH for deployment + pool funding
   const minimumRequired = GUARDIAN_POOL_INITIAL_FUNDING + ethers.parseEther('0.02')
   if (deployerBalance < minimumRequired) {
     throw new Error(
@@ -81,8 +67,6 @@ async function main(): Promise<void> {
       `${ethers.formatEther(minimumRequired)} ETH required (deploy + pool funding)`,
     )
   }
-
-  // ── Step 1: Deploy ConfidentialGuardAttestation ──────────────────────────
   console.log('[1/5] Deploying ConfidentialGuardAttestation...')
   console.log(`      - Owner: ${deployerAddress}`)
 
@@ -92,7 +76,6 @@ async function main(): Promise<void> {
   )
   await attestation.waitForDeployment()
 
-  // Set deployer as placeholder workflow — overwritten by 04_set_workflow.ts after CRE registration
   const setWfTx = await attestation.setWorkflowAddress(deployerAddress)
   await setWfTx.wait()
   console.log(`      - Workflow placeholder: ${deployerAddress} (update via 04_set_workflow.ts)`)
@@ -109,7 +92,6 @@ async function main(): Promise<void> {
   console.log(`      Tx:           ${attestationTx?.hash ?? 'unknown'}`)
   console.log()
 
-  // ── Step 2: Deploy GuardianVault ─────────────────────────────────────────
   console.log('[2/5] Deploying GuardianVault...')
   console.log(`      - CCIP Router:   ${SEPOLIA_CCIP_ROUTER}`)
   console.log(`      - ETH/USD Feed:  ${SEPOLIA_ETH_USD_FEED}`)
@@ -147,10 +129,6 @@ async function main(): Promise<void> {
   console.log(`      Tx: ${fundTx.hash}`)
   console.log()
 
-  // ── Step 4: Register deployer as trusted lender (for test setup) ─────────
-  // In production, the CRE guardian-monitor calls setDebtAmount() via the
-  // trusted lender. The actual lender contracts (Aave adapter, etc.) should
-  // be registered. For now, we register the deployer for testing.
   console.log('[4/5] Registering deployer as trusted lender (for testing)...')
   const lenderTx = await vault.setTrustedLender(deployerAddress, true)
   await lenderTx.wait()
@@ -158,7 +136,6 @@ async function main(): Promise<void> {
   console.log(`      Tx: ${lenderTx.hash}`)
   console.log()
 
-  // ── Step 5: Save deployment record ───────────────────────────────────────
   console.log('[5/5] Saving deployment record...')
   const deployments = loadDeployments()
   deployments.sepolia = {
@@ -172,8 +149,6 @@ async function main(): Promise<void> {
   saveDeployments(deployments)
   console.log(`      Saved to: deployments.json`)
   console.log()
-
-  // ── Summary ───────────────────────────────────────────────────────────────
   console.log('=== DEPLOYMENT COMPLETE ===')
   console.log()
   console.log('Addresses (Ethereum Sepolia):')

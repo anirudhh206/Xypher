@@ -7,48 +7,6 @@ import { Pausable }        from "@openzeppelin/contracts/utils/Pausable.sol";
 import { AggregatorV3Interface } from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import { IConfidentialGuard }    from "../interfaces/IConfidentialGuard.sol";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ConfidentialLender — Undercollateralized ETH Lending Powered by Credit Attestations
-//
-// THE PRIMITIVE
-//   Traditional DeFi lending requires 150%+ collateral because protocols have
-//   no way to assess creditworthiness. ConfidentialLender changes this.
-//
-//   By reading a ConfidentialGuard credit attestation — a cryptographic proof
-//   of creditworthiness computed privately in a Chainlink TEE — this contract
-//   allows qualified borrowers to access capital at collateral ratios that were
-//   previously impossible in DeFi.
-//
-// TIER → LTV MAPPING
-//   Tier 1 (Institutional)  → 90% LTV  (borrow $900 against $1000 collateral)
-//   Tier 2 (Prime)          → 80% LTV  (borrow $800 against $1000 collateral)
-//   Tier 3 (Near-Prime)     → 70% LTV  (borrow $700 against $1000 collateral)
-//   Tier 4 (Subprime)       → 60% LTV  (standard overcollateralized — still better than Aave)
-//   Tier 5 (Ineligible)     → REJECTED (no valid attestation accepted)
-//   No Attestation          → REJECTED
-//
-//   Compare: Aave v3 WETH borrowing = 66% LTV (82.5% liquidation threshold)
-//   Tier 1 borrowers get 90% LTV — 36% more capital efficiency than Aave.
-//
-// SECURITY MODEL
-//   1. Attestation verified on every borrow — no stale credit assumptions.
-//   2. Health factor checked on every borrow — pool never under-secured.
-//   3. Liquidation available when HF < 1.0 — keepers protect the pool.
-//   4. Checks-Effects-Interactions on all state-changing functions.
-//   5. ReentrancyGuard on all ETH-transfer functions.
-//   6. Pausable for emergency circuit breaker.
-//
-// PRICE FEED
-//   Uses Chainlink ETH/USD price feed — same feed as GuardianVault.
-//   Max staleness: 1 hour. Reverts on stale data.
-//
-// ARCHITECTURE NOTE
-//   This contract is intentionally self-contained. It does not inherit from
-//   GuardianVault — it reads the same attestation registry and price feed
-//   independently, demonstrating that IConfidentialGuard is a composable
-//   primitive any protocol can integrate without coupling to other contracts.
-// ─────────────────────────────────────────────────────────────────────────────
-
 contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
 
   // ── Constants ────────────────────────────────────────────────────────────
@@ -68,15 +26,9 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
   /// @notice Minimum deposit: 0.001 ETH (prevents dust positions).
   uint256 public constant MIN_DEPOSIT = 0.001 ether;
 
-  /// @notice Maximum price feed staleness: 1 hour.
   uint256 public constant MAX_PRICE_AGE = 3600;
 
-  /// @notice ETH decimals.
   uint8 public constant ETH_DECIMALS = 18;
-
-  /// @notice Annual interest rate in BPS (5% = 500 BPS).
-  /// @dev Accrued per-second. Simplification for hackathon — production
-  ///      would use a utilisation-based rate model (e.g. Compound's JumpRateModel).
   uint256 public constant ANNUAL_INTEREST_RATE_BPS = 500;
 
   /// @notice Seconds in a year (365 days).
@@ -88,14 +40,6 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
   /// @dev Set at construction. Tier 5 = 0 (rejected).
   mapping(uint8 tier => uint256 ltvBps) public tierMaxLTV;
 
-  // ── Structs ───────────────────────────────────────────────────────────────
-
-  /**
-   * @notice Borrower position in the lending pool.
-   * @dev Packed for gas efficiency.
-   *      Slot 0: collateralAmount(uint128) + borrowedAmount(uint128) = 32 bytes
-   *      Slot 1: borrowTimestamp(uint64) + lastInterestAccrual(uint64) + tier(uint8) = 17 bytes
-   */
   struct BorrowerPosition {
     uint128 collateralAmount;   // ETH collateral deposited (wei)
     uint128 borrowedAmount;     // ETH borrowed (wei, principal only)
@@ -105,15 +49,9 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     uint8   tier;               // Credit tier at time of borrow
   }
 
-  // ── Events ────────────────────────────────────────────────────────────────
-
-  /// @notice Emitted when a lender deposits ETH into the pool.
+  
   event LiquidityDeposited(address indexed lender, uint256 amount);
-
-  /// @notice Emitted when a lender withdraws ETH from the pool.
   event LiquidityWithdrawn(address indexed lender, uint256 amount);
-
-  /// @notice Emitted when a borrower deposits collateral.
   event CollateralDeposited(address indexed borrower, uint256 amount);
 
   /// @notice Emitted when a borrower withdraws collateral.
@@ -226,9 +164,7 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     attestationRegistry = IConfidentialGuard(_attestationRegistry);
     ethUsdFeed          = AggregatorV3Interface(_ethUsdFeed);
 
-    // ── Default Tier LTV Configuration ────────────────────────────────────
-    // These are the on-chain proof that ConfidentialGuard enables capital
-    // efficiency impossible in traditional overcollateralized DeFi lending.
+    
     tierMaxLTV[1] = 9_000; // Tier 1 — Institutional:  90% LTV
     tierMaxLTV[2] = 8_000; // Tier 2 — Prime:           80% LTV
     tierMaxLTV[3] = 7_000; // Tier 3 — Near-Prime:      70% LTV
@@ -236,15 +172,6 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
     tierMaxLTV[5] = 0;     // Tier 5 — Ineligible:      REJECTED
   }
 
-  // ── Admin ─────────────────────────────────────────────────────────────────
-
-  /**
-   * @notice Updates the maximum LTV for a credit tier.
-   * @dev Hard cap of 95% to ensure the pool is never undercollateralised
-   *      even in extreme price scenarios. Only owner.
-   * @param tier   Credit tier to update (1–5).
-   * @param ltvBps New LTV in basis points (e.g. 8000 = 80%).
-   */
   function setTierLTV(uint8 tier, uint256 ltvBps) external onlyOwner {
     if (tier < 1 || tier > 5) revert NoValidAttestation(msg.sender);
     if (ltvBps > 9_500) revert LTVTooHigh(tier, ltvBps);
@@ -258,14 +185,6 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
   /// @notice Unpauses the protocol.
   function unpause() external onlyOwner { _unpause(); }
 
-  // ── Lender Functions ──────────────────────────────────────────────────────
-
-  /**
-   * @notice Deposits ETH into the lending pool.
-   * @dev Lenders earn interest from borrower repayments.
-   *      Any address can provide liquidity — no attestation required.
-   *      Uses checks-effects-interactions.
-   */
   function depositLiquidity() external payable nonReentrant whenNotPaused {
     if (msg.value < MIN_DEPOSIT) revert AmountTooSmall(msg.value, MIN_DEPOSIT);
 
@@ -275,13 +194,6 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
 
     emit LiquidityDeposited(msg.sender, msg.value);
   }
-
-  /**
-   * @notice Withdraws ETH from the lending pool.
-   * @dev Cannot withdraw more than available liquidity (totalLiquidity - totalBorrowed).
-   *      Uses checks-effects-interactions.
-   * @param amount ETH to withdraw (wei).
-   */
   function withdrawLiquidity(uint256 amount) external nonReentrant {
     if (lenderBalances[msg.sender] < amount) {
       revert InsufficientLiquidity(lenderBalances[msg.sender], amount);
@@ -300,16 +212,6 @@ contract ConfidentialLender is Ownable, ReentrancyGuard, Pausable {
 
     emit LiquidityWithdrawn(msg.sender, amount);
   }
-
-  // ── Borrower Functions ────────────────────────────────────────────────────
-
-  /**
-   * @notice Deposits ETH collateral to open or increase a borrowing position.
-   * @dev Attestation is NOT required to deposit — users can pre-deposit
-   *      collateral before getting their attestation. Attestation is only
-   *      required at borrow time.
-   *      Uses checks-effects-interactions.
-   */
   function depositCollateral() external payable nonReentrant whenNotPaused {
     if (msg.value < MIN_DEPOSIT) revert AmountTooSmall(msg.value, MIN_DEPOSIT);
 

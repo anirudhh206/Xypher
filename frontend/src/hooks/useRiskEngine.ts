@@ -12,18 +12,12 @@ import {
 import type { MockPositionData, CreditScoreResult } from "@/lib/risk-engine";
 import { calculateCreditScore } from "@/lib/risk-engine";
 
-// ── Aave v3 Sepolia Pool ──────────────────────────────────────────────────────
-// Source: https://docs.aave.com/developers/deployed-contracts/v3-testnet-addresses
 const AAVE_V3_POOL_SEPOLIA = "0x6Ae43d3271ff6888e7Fc43Fd7321a503ff738951" as const;
 const AAVE_POOL_ABI = parseAbi([
   "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
 ]);
-
-// Aave returns type(uint256).max as HF when the user has no borrows
 const AAVE_HF_NO_DEBT =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 export interface UserPositions {
   loading: boolean;
   error: string | null;
@@ -47,7 +41,7 @@ export interface UserLoan {
   borrowedUSD: number;
   interestAccrued: number;  // ETH
   healthFactor: number;
-  maxBorrowETH: number;     // from getMaxBorrow()
+  maxBorrowETH: number;     
   tier: number;
 }
 
@@ -56,10 +50,8 @@ export interface UserLoanState {
   error: string | null;
   loans: UserLoan[];
   totalBorrowedETH: number;
-  totalBorrowed: number;    // USD alias kept for compatibility
+  totalBorrowed: number;    
 }
-
-// ── Live Chainlink Price Hooks ────────────────────────────────────────────────
 
 export function useLiveETHPrice(): number {
   const { data } = useReadContract({
@@ -69,7 +61,6 @@ export function useLiveETHPrice(): number {
     query: { refetchInterval: 15_000 },
   });
   if (!data || !Array.isArray(data) || data.length < 2) return 0;
-  // answer is int256 with 8 decimal places (USD)
   return Math.abs(Number((data as unknown as bigint[])[1])) / 1e8;
 }
 
@@ -84,15 +75,12 @@ export function useLiveBTCPrice(): number {
   return Math.abs(Number((data as unknown as bigint[])[1])) / 1e8;
 }
 
-// ── Morpho Blue GraphQL ───────────────────────────────────────────────────────
-
 const MORPHO_API = "https://blue-api.morpho.org/graphql";
 
 async function fetchMorphoPositions(
   address: string,
 ): Promise<MockPositionData[]> {
   try {
-    // Try both chainId 1 (mainnet) and 11155111 (Sepolia)
     const query = `{
       userByAddress(address: "${address.toLowerCase()}", chainId: 11155111) {
         marketPositions {
@@ -166,12 +154,8 @@ async function fetchMorphoPositions(
   }
 }
 
-// ── useUserPositions ──────────────────────────────────────────────────────────
-
 export function useUserPositions(): UserPositions {
   const { address } = useAccount();
-
-  // ── Aave v3 Sepolia — direct on-chain read ────────────────────────────────
   const { data: aaveData, isLoading: aaveLoading } = useReadContract({
     address: AAVE_V3_POOL_SEPOLIA,
     abi: AAVE_POOL_ABI,
@@ -182,8 +166,6 @@ export function useUserPositions(): UserPositions {
       refetchInterval: 30_000,
     },
   });
-
-  // ── Morpho Blue — GraphQL API ─────────────────────────────────────────────
   const [morphoPositions, setMorphoPositions] = useState<MockPositionData[]>([]);
   const [morphoLoading, setMorphoLoading] = useState(true);
 
@@ -215,8 +197,6 @@ export function useUserPositions(): UserPositions {
       clearInterval(id);
     };
   }, [address]);
-
-  // ── Build unified position list — memoised so the array reference is stable ─
   const positions = useMemo<MockPositionData[]>(() => {
     const result: MockPositionData[] = [];
 
@@ -267,14 +247,9 @@ export function useUserPositions(): UserPositions {
   };
 }
 
-// ── useUserCreditScore ────────────────────────────────────────────────────────
-
 export function useUserCreditScore(
   positions: MockPositionData[],
 ): UserCreditScore {
-  // useMemo is sufficient — no async work, no side-effects needed.
-  // The previous useState+useCallback+useEffect pattern caused an infinite
-  // render loop because `positions` is a new array reference every render.
   return useMemo<UserCreditScore>(() => {
     if (positions.length === 0) {
       return { loading: false, error: null, score: null, fetchedAt: 0 };
@@ -296,9 +271,6 @@ export function useUserCreditScore(
     }
   }, [positions]);
 }
-
-// ── useUserLoans ──────────────────────────────────────────────────────────────
-// Reads directly from ConfidentialLender on-chain.
 
 export function useUserLoans(ethPrice: number = 0): UserLoanState {
   const { address } = useAccount();
@@ -331,7 +303,6 @@ export function useUserLoans(ethPrice: number = 0): UserLoanState {
       const collateralETH = Number(collateral) / 1e18;
       const borrowedAmount = Number(borrowed) / 1e18;
       const interestAccrued = Number(interest) / 1e18;
-      // Contract returns HF in BPS: 10000 = 1.0x, type(uint256).max = no debt
       const healthFactor =
         hf.toString() === AAVE_HF_NO_DEBT || Number(hf) === 0
           ? collateralETH > 0
@@ -371,8 +342,6 @@ export function useUserLoans(ethPrice: number = 0): UserLoanState {
   };
 }
 
-// ── useAttestation ────────────────────────────────────────────────────────────
-
 export function useAttestation() {
   const { address } = useAccount();
 
@@ -380,9 +349,6 @@ export function useAttestation() {
     address: CONTRACTS.attestation,
     abi: ATTESTATION_ABI,
     functionName: "verifyAttestation",
-    // minTier = 5 (worst tier) so ANY active attestation returns valid = true.
-    // The contract checks `tier <= minTier`, so lower minTier means stricter.
-    // We want to accept all tiers 1-5, hence minTier = 5.
     args: address ? [address as `0x${string}`, 1] : undefined,
     query: { enabled: !!address, refetchInterval: 5_000 },
   });
@@ -391,12 +357,6 @@ export function useAttestation() {
   const isValid = arr.length > 0 ? Boolean(arr[0]) : false;
   const tier = arr.length > 1 ? Number(arr[1]) : 0;
   const expiry = arr.length > 2 ? BigInt(arr[2] as bigint | number) : BigInt(0);
-
-  // isContractError = true means the RPC call itself failed (wrong network,
-  // contract not deployed, transient RPC error). We keep it separate so the
-  // UI can show a soft hint without blocking the grant-permission flow.
-  // isError caused by "no attestation" can't happen — verifyAttestation is a
-  // pure view function that never reverts; it just returns (false, 0, 0).
   console.log("attestation raw data:", data, "isError:", isError, "address:", address); 
   return { isValid, tier, expiry, isLoading, isContractError: isError, refetch };
 }

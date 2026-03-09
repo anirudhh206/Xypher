@@ -1,8 +1,3 @@
-/**
- * Real Lending Flow Hooks
- * Manages deposit, borrow, repay, and withdraw operations
- */
-
 "use client";
 
 import { useState, useCallback } from "react";
@@ -16,9 +11,6 @@ export interface LendingOperation {
   error?: string;
 }
 
-/**
- * Hook: Deposit collateral (send ETH to lender contract)
- */
 export function useDepositCollateral() {
   const { writeContract, isPending, data: hash } = useWriteContract();
   const { isLoading: isMining, isSuccess } = useWaitForTransactionReceipt({
