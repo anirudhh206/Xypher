@@ -153,34 +153,6 @@ No raw financial data is ever exposed.
 
 ---
 
-# Architecture
-
-```
-                ┌─────────────────────────────┐
-                │   Chainlink CRE Enclave     │
-                │                             │
-   Aave API ────┤                             │
-   Morpho API ──┼──► Risk Intelligence Engine │
-   Compound ────┤                             │
-   Plaid API ───┘                             │
-                                              │
-             Unified Health Factor            │
-             Contagion Risk Score             │
-             Debt Serviceability              │
-                        │                     │
-                        ▼                     │
-                   Credit Tier                │
-                └──────────────┬──────────────┘
-                               │
-                               ▼
-        ConfidentialGuardAttestation.sol
-                               │
-              ┌────────────────┴───────────────┐
-              ▼                                ▼
-      ConfidentialLender                CCIP Broadcast
-      Undercollateralized loans         Cross-chain credit
-```
-
 ---
 
 # Credit Tier System
