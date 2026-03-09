@@ -59,6 +59,43 @@ Key properties:
 
 ---
 
+# System Architecture
+
+```mermaid
+flowchart TD
+
+User[User Wallet]
+
+User --> A[Grant Permission]
+
+A --> B[Chainlink CRE Enclave]
+
+B --> C[Aave API]
+B --> D[Morpho API]
+B --> E[Compound API]
+B --> F[Plaid Bank API]
+
+C --> G[Risk Engine]
+D --> G
+E --> G
+F --> G
+
+G --> H[Unified Health Factor]
+G --> I[Contagion Risk Score]
+G --> J[Debt Serviceability]
+
+H --> K[Confidential Credit Score]
+I --> K
+J --> K
+
+K --> L[Credit Tier 1-5]
+
+L --> M[ConfidentialGuardAttestation Contract]
+
+M --> N[ConfidentialLender]
+M --> O[CCIP Cross Chain Sync]
+```
+
 # Problem
 
 Three fundamental barriers prevent real credit markets in DeFi.
