@@ -1,13 +1,3 @@
-/**
- * Real-time Position and Credit Score Hooks
- *
- * Data sources — all live, zero mock data:
- *   • Aave v3 Sepolia   → on-chain getUserAccountData() via wagmi
- *   • Morpho Blue       → public GraphQL API (blue-api.morpho.org)
- *   • Chainlink Feeds   → on-chain latestRoundData() via wagmi
- *   • ConfidentialLender → on-chain getPosition() + getMaxBorrow() via wagmi
- */
-
 "use client";
 
 import { useEffect, useState, useMemo } from "react";
@@ -393,7 +383,7 @@ export function useAttestation() {
     // minTier = 5 (worst tier) so ANY active attestation returns valid = true.
     // The contract checks `tier <= minTier`, so lower minTier means stricter.
     // We want to accept all tiers 1-5, hence minTier = 5.
-    args: address ? [address as `0x${string}`, 5] : undefined,
+    args: address ? [address as `0x${string}`, 1] : undefined,
     query: { enabled: !!address, refetchInterval: 5_000 },
   });
 
@@ -407,5 +397,6 @@ export function useAttestation() {
   // UI can show a soft hint without blocking the grant-permission flow.
   // isError caused by "no attestation" can't happen — verifyAttestation is a
   // pure view function that never reverts; it just returns (false, 0, 0).
+  console.log("attestation raw data:", data, "isError:", isError, "address:", address); 
   return { isValid, tier, expiry, isLoading, isContractError: isError, refetch };
 }

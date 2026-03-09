@@ -502,9 +502,6 @@ video {
 [hidden]:where(:not([hidden="until-found"])) {
   display: none;
 }
-.visible {
-  visibility: visible;
-}
 .collapse {
   visibility: collapse;
 }
@@ -555,9 +552,6 @@ video {
 }
 .italic {
   font-style: italic;
-}
-.underline {
-  text-decoration-line: underline;
 }
 .outline {
   outline-style: solid;
