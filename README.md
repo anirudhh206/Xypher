@@ -1,6 +1,15 @@
-# Xypher Sovereign  
+# Xypher Sovereign
 ### Confidential Credit Oracle for DeFi
 
+[![Solidity](https://img.shields.io/badge/Solidity-0.8.x-blue)](https://soliditylang.org/)
+[![Hardhat](https://img.shields.io/badge/Built%20With-Hardhat-yellow)](https://hardhat.org/)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-257%20Passing-brightgreen)]()
+[![Chainlink](https://img.shields.io/badge/Powered%20By-Chainlink-blue)](https://chain.link/)
+[![Demo](https://img.shields.io/badge/Live%20Demo-Available-purple)](https://xypher.vercel.app)
+
+> Confidential credit intelligence enabling undercollateralized lending across DeFi.
+> 
 > The first confidential credit intelligence layer that privately aggregates a borrower’s full financial profile across **DeFi protocols and traditional finance**, computes risk inside a **hardware-secured Trusted Execution Environment**, and publishes **verifiable on-chain credit attestations** enabling undercollateralized lending.
 
 Built for **Chainlink Convergence Hackathon 2026**
